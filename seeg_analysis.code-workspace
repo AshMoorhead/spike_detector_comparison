@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../seeg_analysis"
+		},
+		{
+			"path": "../python_pipeline"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python-envs.defaultEnvManager": "ms-python.python:venv"
+	}
+}

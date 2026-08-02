@@ -1,0 +1,33 @@
+# Python environment / bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Editor
+.vscode/
+
+# --- Derived data -----------------------------------------------------------
+# Figures ARE tracked: *.png is the output of record for this comparison.
+# These two are not, and the trade-off is worth stating explicitly:
+#
+# detections.npz   -- per-detector spike times for the current window. Rewritten by
+#                     every compare_spikes.py run, so it would churn the history.
+#                     Regenerate it; evaluate_detectors.py / spike_statistics.py
+#                     read only this file.
+detections.npz
+#
+# .delphos_cache/  -- memoised Delphos CLI output, ~5 min per entry. NOTE these are
+#                     NOT bit-reproducible: Delphos tiles internally based on free
+#                     RAM, so re-running the same parameters gives ~2-15% different
+#                     counts (see Delphos.md). Ignoring it means those exact
+#                     detections cannot be recreated. Track it deliberately if a
+#                     specific run needs to be preserved alongside its figures.
+.delphos_cache/
+
+# Delphos also drops these next to the input when output_dir is reused by hand
+*_delphos.mat
+*_delphos.mrk
+*_rate.xlsx
+*_crossrates_with_spikes.xlsx
+*_coocrates_with_spikes.xlsx

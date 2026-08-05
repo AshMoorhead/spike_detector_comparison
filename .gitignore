@@ -33,6 +33,13 @@ detections.npz
 #                    which IS tracked, so nothing needed for scoring is lost.
 sim_data/
 #
+# prep_edf/       -- the post-montage, median-filtered, decimated EDFs written so Delphos can
+#                    read the same signal as the other two arms. Hundreds of MB, and fully
+#                    regenerable: the filename carries rec_id, med_kernel, rate and span, so a
+#                    rebuilt file with the same name IS the same data (unlike .delphos_cache,
+#                    which is not bit-reproducible and is ignored for the opposite reason).
+prep_edf/
+#
 # sim_runs/*.npz is deliberately NOT ignored: one file per (SNR, operating point), ~150 kB,
 # written once rather than on every run, and the only record of Delphos detections that cannot
 # be reproduced bit-for-bit. Same reasoning as the .delphos_cache note above, opposite call --

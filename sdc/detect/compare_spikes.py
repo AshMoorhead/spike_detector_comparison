@@ -111,15 +111,28 @@ RECORDING = os.environ.get("RECORDING", "P1_pre")   # driven per job, like SIM_S
 
 SECONDS = 600          # window length (records are 1 s). Kept fixed across recordings so the
                        # comparison unit is identical; the files are 652-3742 s.
-DETECT_FS = 400.0     # common rate the Janca/Barkmeier arms run at (2000 Hz -> /5)
-MED_KERNEL = int(os.environ.get('MED_KERNEL', 1))
-                      # decimate_recording's median filter, in NATIVE samples. 5 (=2.5 ms) is
-                      # the pipeline default, but it is a NONLINEAR peak-shaving filter that
-                      # Janca and Barkmeier would see and Delphos -- a compiled binary reading
-                      # the raw file -- never can. Since Delphos cannot be matched, the only
-                      # lever is the other two, so 1 (off) puts all three as close to the same
-                      # input as the architecture allows. Set 5 to restore pipeline parity and
-                      # accept the asymmetry.
+DETECT_FS = 1000.0    # common rate ALL THREE arms run at (2000 Hz -> /2).
+                      # Was 400 Hz. Raised because Delphos now reads the preprocessed signal
+                      # too (see PREP_DELPHOS): at 400 Hz its 8-512 Hz detection band would be
+                      # cut at the 200 Hz Nyquist, which is most of its range. 1000 Hz keeps it
+                      # nearly intact while still halving the data.
+MED_KERNEL = int(os.environ.get('MED_KERNEL', 5))
+                      # decimate_recording's median filter, in NATIVE samples. 5 = 2.5 ms, the
+                      # pipeline default. It used to be forced to 1 (off) here, because it is a
+                      # NONLINEAR peak-shaving filter that Janca and Barkmeier saw and Delphos
+                      # -- a compiled binary reading the raw file -- could not. That asymmetry
+                      # is now closed the other way: the preprocessed signal is WRITTEN BACK TO
+                      # AN EDF and Delphos reads that, so all three see the same array and the
+                      # pipeline's own default can be restored.
+PREP_DELPHOS = os.environ.get('PREP_DELPHOS', '1') == '1'
+                      # write the post-montage, median-filtered, decimated signal to an EDF and
+                      # point Delphos at it, instead of the raw file. This is the ONLY way to
+                      # give Delphos the same input as the other two -- it is a compiled binary
+                      # that reads a file, so it cannot be handed an array.
+                      # Delphos derives its OWN bipolar montage by default; since this EDF is
+                      # already bipolar it must be told `bipolar: False`, exactly as the sim
+                      # path does. Get that wrong and it pairs the pairs, silently.
+                      # Set 0 to restore the old behaviour (Delphos on the raw file).
 FILL_BAD_SAMPLES = os.environ.get('FILL_BAD', '0') == '1'
                       # seeg.detect_spikes defaults this TRUE, which AR-fills masked
                       # regions for Barkmeier ONLY -- Janca and Delphos see the real artefact.
@@ -135,6 +148,21 @@ QC_NATIVE = os.environ.get('QC_NATIVE', '1') == '1'
                       # space, and sidesteps asking how much of a 145 Hz stim band survives
                       # the anti-alias filter. Costs nothing: decimate_recording already keeps
                       # the native array in dec["raw"].
+                      #
+                      # KEEP THIS ON NOW THAT MED_KERNEL=5. Two reasons, both load-bearing:
+                      #  1. dec["raw"] is the UNFILTERED native array, so gradThr=400 is still
+                      #     the number it was calibrated against. Running QC on the decimated,
+                      #     median-filtered signal instead would need a re-tuned threshold that
+                      #     nobody has measured yet -- an assumption this avoids entirely.
+                      #  2. decimate_recording copies info WITHOUT rescaling stim_bins, which
+                      #     detect_stim wrote in NATIVE samples. QC on the decimated array
+                      #     would compare epoch centres (decimated) against stim_bins (native)
+                      #     and mislabel every isOn by FACTOR. Silent, and it would land
+                      #     squarely on the ON/OFF results.
+                      # The mask therefore describes the RAW recording, which is the right
+                      # thing: an epoch that was bad is bad regardless of what we filtered
+                      # afterwards. It may over-mask slightly where the median already removed
+                      # an impulse -- conservative, and shared by all three detectors alike.
 DILATE_MS = TROUGH_SEARCH_MS + 20   # artefact-exclusion radius, applied to EVERY detector.
                       # DERIVED, not a literal: this is seeg.detect_spikes' own default
                       # (its 40 ms trough search + a 20 ms buffer). Writing 60 here would
@@ -277,7 +305,24 @@ if not SIMULATE:
     EDF = str(BASE_DIR / f"P{_cfg['patient']}" / f"{_stem}.edf")
     REC_META = dict(rec_id=RECORDING, patient=_cfg["patient"], condition=_cfg["file_type"],
                     stim_hz=float(TRIAL["stim_frequency"]) if TRIAL else float("nan"))
-    DETECTIONS_NPZ = _ROOT / "runs" / f"{RECORDING}.npz"
+    # The filename carries any DEVIATION from the canonical config, and nothing else. A run at
+    # the canonical settings is plain `<rec_id>.npz` -- so downstream defaults keep working --
+    # while a variant gets a suffix and CANNOT overwrite it.
+    # This is not hypothetical tidiness: a MED_KERNEL=1 control run silently replaced the
+    # canonical MED_KERNEL=5 result minutes after it was produced, and only a hand copy saved
+    # it. Same failure as the TAMP=400 incident noted above -- a differently-configured run
+    # sitting in the file where the canonical one is expected.
+    _variant = "".join([
+        "" if MED_KERNEL == 5 else f"_med{MED_KERNEL}",
+        "" if DETECT_FS == 1000.0 else f"_{DETECT_FS:g}Hz",
+        "" if PREP_DELPHOS else "_rawdelphos",
+        "" if QC_NATIVE else "_qcdec",
+        "_fillbad" if FILL_BAD_SAMPLES else "",
+        "" if MERGE_MS == 100.0 else f"_merge{MERGE_MS:g}",
+    ])
+    DETECTIONS_NPZ = _ROOT / "runs" / f"{RECORDING}{_variant}.npz"
+    if _variant:
+        print(f"[config] non-canonical run -> {DETECTIONS_NPZ.name}")
     print(f"--- {RECORDING}: P{_cfg['patient']} trial {_cfg['trial_index']} "
           f"{_cfg['file_type']} -> {_stem}.edf"
           + (f"  ({TRIAL['target']} {TRIAL['stim_frequency']}Hz"
@@ -400,6 +445,35 @@ else:                                              # contributes its own open/cl
     ON_RUNS = np.zeros((0, 2), np.int64)
 
 
+# ----------------------------------------------------------------------
+# The preprocessed EDF -- the only way to give Delphos the same input as the other two.
+# ----------------------------------------------------------------------
+# Delphos is a compiled binary that reads a file, so it cannot be handed `dec["data"]`. Writing
+# that array back out as an EDF is what finally closes the median-filter asymmetry that forced
+# MED_KERNEL=1 for every run before this one.
+#
+# write_edf/verify_edf are sim_data's, reused rather than reimplemented: verify_edf round-trips
+# the file back through BOTH readers the pipeline uses and raises on any mismatch. That check is
+# the whole reason to reuse it -- a silently wrong EDF would cost a 5-minute Delphos call to
+# discover, and would look like a Delphos result rather than a writer bug.
+PREP_EDF = None
+if PREP_DELPHOS and not SIMULATE:
+    from sdc.detect.sim_data import write_edf, verify_edf
+    _prep_dir = _ROOT / "prep_edf"
+    _prep_dir.mkdir(parents=True, exist_ok=True)
+    # Name carries everything that changes the CONTENT, so a stale file can never be picked up
+    # after a config change -- and so Delphos's cache (keyed on path + size) cannot collide.
+    PREP_EDF = str(_prep_dir / f"{REC_META['rec_id']}_med{MED_KERNEL}_{fs:g}Hz_{SECONDS}s.edf")
+    if Path(PREP_EDF).is_file():
+        print(f"[prep] reusing {Path(PREP_EDF).name}")
+    else:
+        print(f"[prep] writing {Path(PREP_EDF).name} "
+              f"({dec['data'].shape[0]} x {dec['data'].shape[1]} at {fs:g} Hz) ...")
+        write_edf(PREP_EDF, dec["data"], list(names), fs)
+        verify_edf(PREP_EDF, dec["data"], list(names), fs)
+        print(f"[prep] verified: round-trips through both pipeline readers")
+
+
 _SAMPLE_MS = 1000.0 / fs
 if MERGE_MS and MERGE_MS < _SAMPLE_MS:
     print(f"[warn] MERGE_MS={MERGE_MS:g} ms is finer than one sample at {fs:g} Hz "
@@ -519,12 +593,22 @@ def run_bark(recording, label=None, **override):
 def run_delphos(label=None, **override):
     """Delphos -> per-channel sample indices on the common `fs` axis, same channel order.
 
-    Runs on the RAW EDF over the SAME wall-clock window as everything else (start_rec=1 with
-    1 s records => file seconds [0, SECONDS)), because the CLI reads the file itself. Marker
-    positions are absolute file seconds, so passing `fs` converts them straight onto the
-    decimated axis; `_finalise` then applies the same mask and merge as the other two."""
-    return _finalise(detect_delphos(EDF, names, fs, start_sec=0.0, duration_sec=SECONDS,
-                                    cache_dir=DELPHOS_CACHE, **{**DELPHOS, **override}), label)
+    Reads a FILE, not an array -- it is a compiled binary. With PREP_DELPHOS that file is the
+    preprocessed EDF written by `_write_prep_edf()`, so it finally sees the same median-filtered,
+    decimated, post-montage signal as Janca and Barkmeier. Without it, the raw EDF, and the
+    median-filter asymmetry is back.
+
+    Marker positions are absolute file seconds either way, so passing `fs` converts them onto
+    the detection axis; `_finalise` then applies the same mask and merge as the other two."""
+    src = PREP_EDF if PREP_DELPHOS else EDF
+    cfg = {**DELPHOS, **override}
+    if PREP_DELPHOS:
+        # The preprocessed EDF is ALREADY bipolar. Delphos montages whatever it is given
+        # (bipolar=True by default), so leaving this on would pair the pairs -- R_8_R_9 with
+        # R_9_R_10 -- and the label match would collapse. Same override the sim path uses.
+        cfg["bipolar"] = False
+    return _finalise(detect_delphos(src, names, fs, start_sec=0.0, duration_sec=SECONDS,
+                                    cache_dir=DELPHOS_CACHE, **cfg), label)
 
 
 def _match(a, b, tol):
@@ -577,6 +661,10 @@ def _dump_detections(dets, path, extra=None):
                  # preprocessing toggles -- these MOVE the numbers, so a run that does not
                  # record them cannot be compared with one that does
                  "qc_native": np.int64(bool(QC_NATIVE)), "med_kernel": np.int64(MED_KERNEL),
+                 # WHICH FILE DELPHOS READ. Before this existed, a run with the median filter
+                 # on and one with it off were indistinguishable in the npz, and they are not
+                 # comparable -- Delphos saw a different signal in each.
+                 "delphos_input": "preprocessed" if (PREP_DELPHOS and not SIMULATE) else "raw",
                  "fill_bad_samples": np.int64(bool(FILL_BAD_SAMPLES)),
                  "mask_frac": float(np.mean(dmask)),
                  # recording identity -- absent entirely before, which is why a second

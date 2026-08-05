@@ -3,7 +3,7 @@ stim_effect.py
 --------------
 What does each detector say stimulation did to the spike rate?
 
-    .venv\\Scripts\\python.exe stim_effect.py runs/P1_stim.npz
+    .venv\\Scripts\\python.exe -m sdc.compare.stim_effect runs/P1_stim.npz
 
 This exists because the three detectors do not agree on the SIGN of the effect: on P1, pooled
 over the channels measurable in both conditions, the ON/OFF rate ratio is Janca 0.57,
@@ -37,9 +37,10 @@ from scipy.stats import wilcoxon
 
 from seeg._style import RED, BLUE, MUTED, GRID, recessive
 
-import cond
+from sdc.common import cond
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 NPZ = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "runs" / "P1_stim.npz"
 if not NPZ.is_file():
     raise SystemExit(f"{NPZ} not found -- run compare_spikes.py first.")

@@ -36,8 +36,8 @@ WHAT TO ASK OF EACH PANEL
 Drawn at the file's NATIVE rate, not the 400 Hz detection axis: polyspike components live in
 the fast band and decimation blurs exactly the thing being judged.
 
-    .venv\\Scripts\\python.exe polyspike_review.py
-    .venv\\Scripts\\python.exe polyspike_review.py 12      # 12 examples per band
+    .venv\\Scripts\\python.exe -m sdc.tools.polyspike_review
+    .venv\\Scripts\\python.exe -m sdc.tools.polyspike_review 12      # 12 examples per band
 """
 import sys
 from pathlib import Path
@@ -48,9 +48,10 @@ import matplotlib.pyplot as plt
 from seeg import read_edf_header, load_edf_segment, derive_montage, apply_montage
 from seeg._style import RED, BLUE, MUTED, recessive
 
-import cond
+from sdc.common import cond
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 # Needs UNDER-merged detections (see the guard in main()): the live runs are at
 # MERGE_MS=100, which has already collapsed the 20-300 ms pairs this reviews.
 NPZ = (Path(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].endswith(".npz")
@@ -58,7 +59,7 @@ NPZ = (Path(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].endswith(".npz")
 # COND=on / COND=off restricts to the stim blocks of a stim recording, the same switch the
 # evaluation scripts take. The candidate search then runs on the subset, and a pair straddling
 # an ON/OFF boundary can never seed a candidate because that gap is not a real interval:
-#     COND=on .venv\Scripts\python.exe polyspike_review.py runs/P1_stim.npz 9
+#     COND=on .venv\Scripts\python.exe -m sdc.tools.polyspike_review runs/P1_stim.npz 9
 SUB = ""                 # filled from $COND at load time; "" for the whole window
 OUT = HERE / "figures" / "real" / "polyspike_review"
                          # re-pointed per run in load_detections(), so a stim recording's

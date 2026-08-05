@@ -4,9 +4,9 @@ cond.py
 Restrict a run to stim-ON or stim-OFF, and give the downstream scripts a time base that is
 honest about the fact that the result is GAPPY.
 
-    COND=on  python spike_statistics.py runs/P1_stim.npz
-    COND=off python evaluate_detectors.py runs/P1_stim.npz
-    COND=all python evaluate_detectors.py runs/P1_stim.npz     # default, one segment
+    COND=on  python -m sdc.compare.spike_statistics runs/P1_stim.npz
+    COND=off python -m sdc.compare.evaluate_detectors runs/P1_stim.npz
+    COND=all python -m sdc.compare.evaluate_detectors runs/P1_stim.npz     # default, one segment
 
 Selecting a condition is not just a mask on the detections. An intermittent stim protocol cuts
 the 600 s window into alternating blocks, so the ON subset is a handful of separated segments,

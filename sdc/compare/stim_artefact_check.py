@@ -4,7 +4,7 @@ stim_artefact_check.py
 A ROUGH check on whether a detector's stim-ON behaviour is driven by residual stimulation
 artefact rather than by brain activity.
 
-    .venv\\Scripts\\python.exe stim_artefact_check.py runs/P1_stim.npz
+    .venv\\Scripts\\python.exe -m sdc.compare.stim_artefact_check runs/P1_stim.npz
 
 The question it exists for: `stim_effect.py` shows Janca and Barkmeier saying spikes more than
 halved during stimulation while Delphos says nothing happened. One explanation is physiology.
@@ -43,9 +43,10 @@ from scipy.stats import spearmanr
 from seeg import read_edf_header, load_edf_segment, derive_montage, apply_montage
 from seeg._style import RED, BLUE, MUTED, GRID, recessive
 
-import cond
+from sdc.common import cond
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 NPZ = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "runs" / "P1_stim.npz"
 
 N_WIN = 10          # one-second windows sampled per condition. Ten is enough for a band-power

@@ -3,7 +3,7 @@ compare_recordings.py
 ---------------------
 Does each finding hold across CONDITION (stim ON vs OFF) and across PATIENT?
 
-    .venv\\Scripts\\python.exe compare_recordings.py
+    .venv\\Scripts\\python.exe -m sdc.compare.compare_recordings
 
 Reads `runs/*.npz` ONLY -- no detector is ever re-run, so this is seconds even though the runs
 behind it cost ~20 minutes of Delphos.
@@ -34,10 +34,11 @@ from scipy.stats import spearmanr
 
 from seeg._style import RED, BLUE, MUTED, GRID, recessive
 
-import cond
-from spike_match import match
+from sdc.common import cond
+from sdc.common.spike_match import match
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 RUNS = HERE / "runs"
 OUT = HERE / "figures" / "real"
 

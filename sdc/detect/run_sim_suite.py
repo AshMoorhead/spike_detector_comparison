@@ -17,9 +17,9 @@ COST
   (the 5th sweep value is the operating point itself and hits the cache), so budget ~50 min
   the first time and seconds thereafter. --dry-run prints the plan without running anything.
 
-    .venv\\Scripts\\python.exe run_sim_suite.py --dry-run
-    .venv\\Scripts\\python.exe run_sim_suite.py            # SNR curve only (6 jobs)
-    .venv\\Scripts\\python.exe run_sim_suite.py --sweep    # + the 15 threshold-sweep points
+    .venv\\Scripts\\python.exe -m sdc.detect.run_sim_suite --dry-run
+    .venv\\Scripts\\python.exe -m sdc.detect.run_sim_suite            # SNR curve only (6 jobs)
+    .venv\\Scripts\\python.exe -m sdc.detect.run_sim_suite --sweep    # + the 15 threshold-sweep points
 
 NOTHING HERE IS PLOTTING COST. Every figure in score_sim_detectors.py draws in under a second
 from stored npz files. The entire runtime is the Delphos CLI: ~4-5 min per uncached call,
@@ -34,9 +34,10 @@ import sys
 import time
 from pathlib import Path
 
-import sim_data
+from sdc.detect import sim_data
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 SIM_RUNS = HERE / "sim_runs"
 
 MID_SNR = 5.0     # the sweep runs at ONE level; 5 sits in the middle of SNR_LIST and is where
@@ -80,11 +81,14 @@ def npz_for(job, cfg):
 
 def run(job, cfg, log=print):
     # SIM_FORCE flips compare_spikes.SIMULATE for the child only, so the file on disk keeps
-    # SIMULATE=False and a bare `python compare_spikes.py` still runs the real recording.
+    # SIMULATE=False and a bare `python -m sdc.detect.compare_spikes` still runs the real recording.
     env = {**os.environ, "SIM_FORCE": "1", "SIM_SNR": f"{job['snr']:g}",
            "SIM_POINT": job["point"], "SIM_OVERRIDE": json.dumps(job["override"] or {})}
     t0 = time.time()
-    p = subprocess.run([sys.executable, "compare_spikes.py"], cwd=str(HERE), env=env)
+    p = subprocess.run([sys.executable, "-m", "sdc.detect.compare_spikes"],
+                       cwd=str(HERE), env=env)
+        # -m from the REPO ROOT (HERE is the root now, not this file's dir): the child
+        # must resolve `sdc.` imports the same way the parent did.
     dt = time.time() - t0
     log(f"    -> exit {p.returncode} in {dt / 60:.1f} min")
     return p.returncode == 0
@@ -138,7 +142,7 @@ def main(argv):
     print(f"\n--- done: {len(todo) - len(failed)}/{len(todo)} succeeded ---")
     if failed:
         print(f"    FAILED: {', '.join(failed)}")
-    print(f"    next:  .venv\\Scripts\\python.exe score_sim_detectors.py")
+    print(f"    next:  .venv\\Scripts\\python.exe -m sdc.scoring.score_sim_detectors")
     return 1 if failed else 0
 
 

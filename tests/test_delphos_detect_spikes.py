@@ -8,7 +8,7 @@ pipeline channels/sample indices. The CLI call itself is stubbed out.
 Worth keeping as a tool: Delphos costs ~5 min per real call and needs MATLAB Runtime 9.5,
 so this is the only fast way to tell "my parsing/merging is broken" from "Delphos moved".
 
-    .venv\\Scripts\\python.exe test_delphos_detect_spikes.py
+    .venv\\Scripts\\python.exe -m tests.test_delphos_detect_spikes
 """
 import os
 import shutil
@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from scipy.io import savemat
 
-import delphos_detect_spikes as dd
+from sdc.detect import delphos_detect_spikes as dd
 
 FS = 400.0
 

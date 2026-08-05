@@ -66,8 +66,8 @@ Janca-only. Delphos needs MATLAB Runtime 9.5 (R2018b) -- a separate install -- p
 per call, so it is cached on disk and any failure degrades to "no Delphos panel".
 
 Run with the local venv:
-    .venv\\Scripts\\Activate.ps1      then      python compare_spikes.py
-    (or, without activating:   .venv\\Scripts\\python.exe compare_spikes.py)
+    .venv\\Scripts\\Activate.ps1      then      python -m sdc.detect.compare_spikes
+    (or, without activating:   .venv\\Scripts\\python.exe -m sdc.detect.compare_spikes)
 """
 import json
 import os
@@ -88,9 +88,10 @@ from seeg import detect_spikes as detect_barkmeier
 # copies agreed only by coincidence.
 from seeg.spikes import FILTER_SPEC, STD_COEFF, TROUGH_SEARCH_MS
 from seeg._style import RED, BLUE, MUTED, MEDIAN, recessive
-from janca_detect_spikes import detect_spikes as detect_janca
-from delphos_detect_spikes import detect_spikes as detect_delphos
-from spike_match import match as spike_match_fn
+from sdc.detect.janca_detect_spikes import detect_spikes as detect_janca
+from sdc.detect.delphos_detect_spikes import detect_spikes as detect_delphos
+from sdc.common.spike_match import match as spike_match_fn
+from sdc.common.paths import ROOT as _ROOT
 
 # ---- which recording ----------------------------------------------------------------
 # Recordings are named by (patient, trial, condition) and RESOLVED through the pipeline's own
@@ -204,9 +205,9 @@ BARK = dict(LS=3.0, RS=3.0, TAMP=1200.0, LD=8, RD=8,
 DELPHOS = dict(pin_free_ram_gb=12, Spk_thr=50, Spk_time_thr=1.25, chunk_sec=None)   # exe path etc: delphos_detect_spikes.DEFAULTS
 # ~5 min/call -> memoised by file+window+params. Anchored to THIS FILE, not the cwd: a miss
 # costs 5 minutes, so the cache must not quietly move when you run the script from elsewhere.
-DELPHOS_CACHE = Path(__file__).resolve().parent / ".delphos_cache"
+DELPHOS_CACHE = _ROOT / ".delphos_cache"
 # Detections dumped for evaluate_detectors.py (the evaluation plots read ONLY this file).
-DETECTIONS_NPZ = Path(__file__).resolve().parent / "detections.npz"
+DETECTIONS_NPZ = _ROOT / "detections.npz"
 
 # ---- SWEEP: you drive this. Set RUN_SWEEP=True, pick a detector/param/grid, run the script. ----
 # The swept detector is scored against SWEEP_REF's DEFAULT run -- that is how Barkmeier's
@@ -241,7 +242,7 @@ SIM_SNR = float(os.environ.get("SIM_SNR", 8.0))          # which SNR level to ru
 SIM_POINT = os.environ.get("SIM_POINT", "op")            # run label -> npz filename
 SIM_OVERRIDE = json.loads(os.environ.get("SIM_OVERRIDE", "") or "{}")   # {detector,param,value}
 SIM_CLEAN_MASK = True  # zero the QC mask (the sim contains no artefacts -- see below)
-SIM_RUNS = Path(__file__).resolve().parent / "sim_runs"
+SIM_RUNS = _ROOT / "sim_runs"
 # The env vars just DEFAULT to the constants above, so nothing changes when they are unset.
 # They exist so run_sim_suite.py can drive 6 SNR levels + 15 sweep points without editing this
 # file 21 times.
@@ -249,7 +250,7 @@ SIM_RUNS = Path(__file__).resolve().parent / "sim_runs"
 # ----------------------------------------------------------------------
 _sim = None
 if SIMULATE:
-    import sim_data
+    from sdc.detect import sim_data
     _sim = sim_data.ensure_sim_edf(snr=SIM_SNR)
     EDF = str(_sim["edf"])
     if SECONDS != _sim["cfg"]["dur_sec"]:
@@ -276,7 +277,7 @@ if not SIMULATE:
     EDF = str(BASE_DIR / f"P{_cfg['patient']}" / f"{_stem}.edf")
     REC_META = dict(rec_id=RECORDING, patient=_cfg["patient"], condition=_cfg["file_type"],
                     stim_hz=float(TRIAL["stim_frequency"]) if TRIAL else float("nan"))
-    DETECTIONS_NPZ = Path(__file__).resolve().parent / "runs" / f"{RECORDING}.npz"
+    DETECTIONS_NPZ = _ROOT / "runs" / f"{RECORDING}.npz"
     print(f"--- {RECORDING}: P{_cfg['patient']} trial {_cfg['trial_index']} "
           f"{_cfg['file_type']} -> {_stem}.edf"
           + (f"  ({TRIAL['target']} {TRIAL['stim_frequency']}Hz"
@@ -741,7 +742,7 @@ fig.tight_layout()
 # whichever sim job finished last -- a SWEEP point with one detector deliberately desensitised.
 # SWEEP POINTS GET NO RASTER AT ALL: a raster of one detector at an off-default threshold
 # answers no question, and writing one per point produced 30 near-identical figures.
-_HERE = Path(__file__).resolve().parent
+_HERE = _ROOT
 if SIMULATE and SIM_OVERRIDE:
     _RASTER = None
 elif SIMULATE:

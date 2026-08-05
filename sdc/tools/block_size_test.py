@@ -4,8 +4,8 @@ block_size_test.py
 The falsifying experiment for finding 3: is Barkmeier's behaviour caused by the per-block
 threshold in `mDetectSpike.m:291`?
 
-    .venv\\Scripts\\python.exe block_size_test.py runs/P1_pre.npz
-    .venv\\Scripts\\python.exe block_size_test.py runs/P1_stim.npz
+    .venv\\Scripts\\python.exe -m sdc.tools.block_size_test runs/P1_pre.npz
+    .venv\\Scripts\\python.exe -m sdc.tools.block_size_test runs/P1_stim.npz
 
 WHY THIS AND NOT MORE CORRELATION
   Three independent lines already point at the same mechanism, and all three are correlational:
@@ -56,9 +56,10 @@ from seeg import (read_edf_header, load_edf_segment, derive_montage, apply_monta
 from seeg.spikes import FILTER_SPEC, STD_COEFF, TROUGH_SEARCH_MS
 from seeg._style import RED, BLUE, MUTED, GRID, recessive
 
-import cond
+from sdc.common import cond
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 NPZ = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "runs" / "P1_pre.npz"
 if not NPZ.is_file():
     raise SystemExit(f"{NPZ} not found -- run compare_spikes.py first.")

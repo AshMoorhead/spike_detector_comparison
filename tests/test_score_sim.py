@@ -9,7 +9,7 @@ score_sim_detectors.py measures ACCURACY, and they must use the same matcher or 
 stop being comparable. That test pins spike_match.match against an inlined copy of the
 algorithm compare_spikes used before the extraction.
 
-    .venv\\Scripts\\python.exe test_score_sim.py
+    .venv\\Scripts\\python.exe -m tests.test_score_sim
 """
 import shutil
 import tempfile
@@ -17,8 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
-import score_sim_detectors as ss
-from spike_match import match
+from sdc.scoring import score_sim_detectors as ss
+from sdc.common.spike_match import match
 
 
 # ----------------------------------------------------------------------
@@ -189,7 +189,7 @@ def test_partial_auc_and_ap():
 def test_npz_roundtrip(tmp):
     """A sim npz written in compare_spikes' schema must load with allow_pickle=False and come
     back as seconds on the right channels."""
-    import sim_data as sd
+    from sdc.detect import sim_data as sd
     fs, truth_fs, seconds, n_chan = 400.0, 2000.0, 20.0, 3
     truth_idx = np.array([4000, 12000, 30000], np.int64)      # 2, 6, 15 s @ 2000 Hz
     truth_chan = np.array([0, 1, 1], np.int64)
@@ -228,7 +228,7 @@ def test_npz_roundtrip(tmp):
 def test_edge_guard_drops_both_sides(tmp):
     """The guard must drop TRUTH as well as detections -- dropping only detections would
     manufacture false negatives at both ends."""
-    import sim_data as sd
+    from sdc.detect import sim_data as sd
     cfg = sd.default_cfg(n_chan=1, dur_sec=20)
     p = tmp / "sim_edge_snr5_op.npz"
     np.savez(p, names=np.array(["SIM1"], dtype="U"), fs=400.0, seconds=np.int64(20),

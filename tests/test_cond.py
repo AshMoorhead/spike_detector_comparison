@@ -5,13 +5,13 @@ These are the three things that break silently when an intermittent-stim run is 
 are the three things worth a test: the rate denominator, the ISI that spans a gap, and the bin
 that straddles a boundary.
 
-    .venv\\Scripts\\python.exe test_cond.py
+    .venv\\Scripts\\python.exe -m tests.test_cond
 """
 import contextlib
 
 import numpy as np
 
-import cond
+from sdc.common import cond
 
 
 @contextlib.contextmanager

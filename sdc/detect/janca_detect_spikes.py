@@ -26,7 +26,7 @@ not the goal. For a decimation-free comparison pass `dec=0`.
 
 DEFAULT PATH VERIFIED: the default settings (dec=200, beta=Inf i.e. beta detector
 off, k1==k2 i.e. no ambiguous tier, cheby2 filtering) are the path exercised by the
-smoke test at the bottom (`python janca_detect_spikes.py`). The beta detector and the
+smoke test at the bottom (`python -m sdc.detect.janca_detect_spikes`). The beta detector and the
 ambiguous/k2 tier are ported for completeness but are off by default.
 
 INDEXING: `out['pos']` and `discharges['MP']` are in SECONDS of real time (relative

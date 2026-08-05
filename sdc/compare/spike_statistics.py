@@ -30,7 +30,7 @@ Q2  WHAT BIN WIDTH IS NEEDED FOR A REASONABLE RATE ESTIMATE?
     A rate is a per-CHANNEL quantity, so the answer is per-channel too: a 0.8 Hz channel needs
     far less time than a 0.05 Hz one. The curve is therefore reported for rate tiers.
 
-    .venv\\Scripts\\python.exe spike_statistics.py
+    .venv\\Scripts\\python.exe -m sdc.compare.spike_statistics
 
 Reads only detections.npz -- run compare_spikes.py first, ideally on a long segment (600 s+):
 with a 60 s window the widest usable bin is a few seconds and the answer is uninformative.
@@ -43,18 +43,19 @@ import matplotlib.pyplot as plt
 
 from seeg._style import RED, BLUE, MUTED, GRID, recessive
 
-import cond
+from sdc.common import cond
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 # Which run to evaluate. Defaults to the P1 baseline; pass any npz to switch:
-#     python spike_statistics.py runs/P1_stim.npz
-#     python spike_statistics.py sim_runs/sim_ar16_<hash>_snr8_op.npz
+#     python -m sdc.compare.spike_statistics runs/P1_stim.npz
+#     python -m sdc.compare.spike_statistics sim_runs/sim_ar16_<hash>_snr8_op.npz
 # Figures go to figures/<real|sim>/<run>/ -- one FOLDER per recording, plain filenames
 # inside. Routing is read from the npz itself ("simulated" key), not guessed from the
 # path, so a sim run can never be mistaken for -- or overwrite -- patient data.
 #
 # On a stim recording, COND restricts everything below to the stim-ON (or stim-OFF) blocks:
-#     COND=on python spike_statistics.py runs/P1_stim.npz
+#     COND=on python -m sdc.compare.spike_statistics runs/P1_stim.npz
 # That subset is GAPPY, and every measure here is gap-sensitive: an ISI measured across an OFF
 # block is an artefact of the split, and a bin straddling a boundary is part ON and part OFF.
 # cond.py handles both -- nothing below may use np.diff or np.arange on the time axis directly.

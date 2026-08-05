@@ -31,7 +31,7 @@ anchoring the curve at (0,0) and (1,1) to get a "full" AUC is extrapolation, not
 What is reported is the trapezoid over the SWEPT range, normalised by that range, with every
 point annotated with the threshold that produced it.
 
-    .venv\\Scripts\\python.exe score_sim_detectors.py
+    .venv\\Scripts\\python.exe -m sdc.scoring.score_sim_detectors
 """
 import json
 import sys
@@ -41,9 +41,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from seeg._style import RED, BLUE, MUTED, recessive
-from spike_match import match
+from sdc.common.spike_match import match
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 SIM_RUNS = HERE / "sim_runs"   # inputs: one npz per (SNR, operating point), tracked in git
 OUT = HERE / "figures" / "sim" / "_summary"   # aggregates ACROSS sim runs, so it sits
                                # beside the per-run folders rather than inside one

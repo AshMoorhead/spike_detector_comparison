@@ -11,7 +11,7 @@ Worth keeping as a tool. Two of these are load-bearing for every number the scor
     on the 400 Hz decimated axis. If decimate_recording ever shifts timing, every recall
     number silently drops and nothing else would tell you.
 
-    .venv\\Scripts\\python.exe test_sim_data.py
+    .venv\\Scripts\\python.exe -m tests.test_sim_data
 """
 import math
 import shutil
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-import sim_data as sd
+from sdc.detect import sim_data as sd
 
 
 # ----------------------------------------------------------------------

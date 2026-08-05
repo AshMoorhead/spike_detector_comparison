@@ -68,7 +68,7 @@ OUTPUT (per SNR level), under sim_data/:
   silently serving detections computed on different data.
 
 Run with the local venv:
-    .venv\\Scripts\\python.exe sim_data.py            # build every SNR level + the diagnostic
+    .venv\\Scripts\\python.exe -m sdc.detect.sim_data            # build every SNR level + the diagnostic
 """
 import hashlib
 import json
@@ -79,7 +79,8 @@ import numpy as np
 import scipy.io as sio
 from scipy.signal import butter, filtfilt, lfilter
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 
 # ----------------------------------------------------------------------
 # CONFIG

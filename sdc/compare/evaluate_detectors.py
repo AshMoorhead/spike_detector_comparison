@@ -5,8 +5,8 @@ Evaluation plots for the detector comparison. Reads ONLY `detections.npz` (writt
 compare_spikes.py) -- so redrawing a figure never re-runs a detector, and never pays the
 ~5 min Delphos call.
 
-    .venv\\Scripts\\python.exe compare_spikes.py      # once, to produce detections.npz
-    .venv\\Scripts\\python.exe evaluate_detectors.py  # as often as you like
+    .venv\\Scripts\\python.exe -m sdc.detect.compare_spikes      # once, to produce detections.npz
+    .venv\\Scripts\\python.exe -m sdc.compare.evaluate_detectors  # as often as you like
 
 Three views, each answering a different question about whether the detectors agree on WHERE
 the epileptic activity is (not on individual events -- compare_spikes.py's Jaccard covers
@@ -35,18 +35,19 @@ from scipy.stats import rankdata, spearmanr
 
 from seeg._style import RED, BLUE, MUTED, GRID, recessive
 
-import cond
+from sdc.common import cond
 
-HERE = Path(__file__).resolve().parent
+from sdc.common.paths import ROOT as HERE   # repo root, not this file's dir --
+                                            # see sdc/common/paths.py
 # Which run to evaluate. Defaults to the P1 baseline; pass any npz to switch:
-#     python evaluate_detectors.py runs/P1_stim.npz
-#     python evaluate_detectors.py sim_runs/sim_ar16_<hash>_snr8_op.npz
+#     python -m sdc.compare.evaluate_detectors runs/P1_stim.npz
+#     python -m sdc.compare.evaluate_detectors sim_runs/sim_ar16_<hash>_snr8_op.npz
 # Figures go to figures/<real|sim>/<run>/ -- one FOLDER per recording, plain filenames
 # inside. Routing is read from the npz itself ("simulated" key), not guessed from the
 # path, so a sim run can never be mistaken for -- or overwrite -- patient data.
 #
 # On a stim recording, COND restricts everything below to the stim-ON (or stim-OFF) blocks:
-#     COND=on python evaluate_detectors.py runs/P1_stim.npz
+#     COND=on python -m sdc.compare.evaluate_detectors runs/P1_stim.npz
 # The subset is GAPPY, so the time base comes from cond.select rather than from `seconds` --
 # see cond.py for why a rate denominator and a bin boundary both have to change with it.
 NPZ = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "runs" / "P1_pre.npz"

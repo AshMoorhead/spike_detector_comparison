@@ -40,24 +40,28 @@ must not cost anything. Anything an evaluation needs has to be *in* the npz.
 
 | file | reads | writes | cost |
 |---|---|---|---|
-| `compare_spikes.py` | an EDF (via the trials JSON) | `runs/<id>.npz`, `figures/real/<id>/compare_raster.png` | ~5 min (Delphos), seconds if cached |
-| `evaluate_detectors.py` | an npz | 4 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
-| `spike_statistics.py` | an npz | 3 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
-| `stim_effect.py` | a **stim** npz | `figures/real/<run>/stim_effect.png` | seconds |
-| `stim_artefact_check.py` | a **stim** npz + its EDF | `figures/real/<run>/stim_artefact_check.png` | ~1 min |
-| `block_size_test.py` | an npz + its EDF | `figures/real/<run>/block_size_test.png` | ~10 min (MATLAB x4) |
-| `compare_recordings.py` | all of `runs/*.npz` | `figures/real/compare_recordings.png` | seconds |
-| `polyspike_review.py` | the ARCHIVED 20 ms npz + the EDF | 6 × `figures/real/polyspike_review/*.png` | ~1 min |
-| `sim_data.py` | `sim_noise_model.mat` | `sim_data/*.edf` + `.truth.npz`, preview figures | ~1 min, 38 MB/level |
-| `run_sim_suite.py` | — | `sim_runs/*.npz` (drives `compare_spikes.py` per job) | ~40 min uncached |
-| `score_sim_detectors.py` | `sim_runs/*.npz` | 6 × `figures/sim/_summary/sim_*.png` | seconds |
-| `spike_match.py` | — | — | the one greedy matcher, shared by agreement *and* accuracy |
-| `cond.py` | — | — | stim ON/OFF subsetting + the gap-aware time base it forces |
+| `sdc/detect/compare_spikes.py` | an EDF (via the trials JSON) | `runs/<id>.npz`, `figures/real/<id>/compare_raster.png` | ~5 min (Delphos), seconds if cached |
+| `sdc/compare/evaluate_detectors.py` | an npz | 4 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
+| `sdc/compare/spike_statistics.py` | an npz | 3 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
+| `sdc/compare/stim_effect.py` | a **stim** npz | `figures/real/<run>/stim_effect.png` | seconds |
+| `sdc/compare/stim_artefact_check.py` | a **stim** npz + its EDF | `figures/real/<run>/stim_artefact_check.png` | ~1 min |
+| `sdc/tools/block_size_test.py` | an npz + its EDF | `figures/real/<run>/block_size_test.png` | ~10 min (MATLAB x4) |
+| `sdc/compare/compare_recordings.py` | all of `runs/*.npz` | `figures/real/compare_recordings.png` | seconds |
+| `sdc/tools/polyspike_review.py` | the ARCHIVED 20 ms npz + the EDF | 6 × `figures/real/polyspike_review/*.png` | ~1 min |
+| `sdc/detect/sim_data.py` | `sim_noise_model.mat` | `sim_data/*.edf` + `.truth.npz`, preview figures | ~1 min, 38 MB/level |
+| `sdc/detect/run_sim_suite.py` | — | `sim_runs/*.npz` (drives `compare_spikes.py` per job) | ~40 min uncached |
+| `sdc/scoring/score_sim_detectors.py` | `sim_runs/*.npz` | 6 × `figures/sim/_summary/sim_*.png` | seconds |
+| `sdc/common/spike_match.py` | — | — | the one greedy matcher, shared by agreement *and* accuracy |
+| `sdc/common/cond.py` | — | — | stim ON/OFF subsetting + the gap-aware time base it forces |
 | `janca_detect_spikes.py`, `delphos_detect_spikes.py` | — | — | detector wrappers |
-| `test_sim_data.py`, `test_score_sim.py`, `test_delphos_detect_spikes.py`, `test_cond.py` | — | — | plain scripts, no pytest; `<10 s` |
+| `tests/test_*.py` | — | — | plain scripts, no pytest; `<10 s` |
 
-Run everything through the venv: `.venv\Scripts\python.exe <script>.py`.
-The evaluation scripts take an optional npz path: `python evaluate_detectors.py sim_runs/<x>.npz`
+Run everything **from the repo root** as a module: `.venv\Scripts\python.exe -m sdc.<group>.<name>`.
+Layout: `sdc/detect` produces detections, `sdc/compare` compares detectors against each
+other, `sdc/scoring` scores them against ground truth, `sdc/tools` are one-off
+investigations, `sdc/common` is shared. Data directories resolve through
+`sdc/common/paths.py`, never from a module's own location.
+The evaluation scripts take an optional npz path: `python -m sdc.compare.evaluate_detectors sim_runs/<x>.npz`
 sends the figures to `figures/sim/<run>/` instead of `figures/real/<run>/`.
 
 `compare_spikes.py` picks its recording from `$RECORDING` (`P1_pre`, `P1_stim`, …), one npz each.
@@ -68,8 +72,8 @@ On an intermittent-stim recording, `$COND` restricts an evaluation to the stim-O
 blocks. Figures gain an `_on` / `_off` suffix, so a split never overwrites the whole-window ones:
 
 ```
-COND=on  python spike_statistics.py   runs/P1_stim.npz
-COND=off python evaluate_detectors.py runs/P1_stim.npz
+COND=on  python -m sdc.compare.spike_statistics   runs/P1_stim.npz
+COND=off python -m sdc.compare.evaluate_detectors runs/P1_stim.npz
 ```
 
 **This is not just a filter on the detections, and that is the whole reason `cond.py` exists.**

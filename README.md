@@ -1,0 +1,284 @@
+# spike_detector_comparison
+
+Three interictal spike detectors run over the **same window** of the same recording, through
+**identical post-processing**, and scored two ways: against each other on real SEEG, and
+against known ground truth on synthetic data.
+
+| detector | how it decides | implementation |
+|---|---|---|
+| **Janča** | statistical threshold on the Hilbert envelope of a band-passed signal, against a per-channel background model | `janca_detect_spikes.py` — pure Python port of `spike_detector_hilbert_v24.m` |
+| **Barkmeier** | waveform *shape* — half-wave slopes, summed amplitude, half-widths | `seeg.detect_spikes` → `mDetectSpike.m` via the MATLAB engine |
+| **Delphos** | sharpness of blobs in a whitened time-frequency plane | `delphos_detect_spikes.py` → compiled `Delphos_cmd_line.exe` |
+
+They disagree because they use three unrelated definitions of "spike", not because one is
+mistuned. The point of the repo is to characterise *how* they disagree and *why*.
+
+---
+
+## Data flow
+
+```
+   trials JSON ─► (patient, trial, condition) ─► resolve_file ─► EDF ─┐
+                                                                     ├─► compare_spikes.py
+   sim_data.py ──────────────────────────────────► synthetic EDF ────┘   (~5 min per
+                                                                         uncached Delphos)
+                          │                                    │
+                    runs/<id>.npz                        sim_runs/*.npz
+                          │                                    │
+        ┌─────────────────┼──────────────────┐                 └─► score_sim_detectors.py
+        ▼                 ▼                  ▼
+  evaluate_detectors  spike_statistics  polyspike_review
+```
+
+**The npz is the only interface.** Every evaluation script reads it and **never re-runs a
+detector** — that is deliberate, because a Delphos call costs ~5 minutes and redrawing a figure
+must not cost anything. Anything an evaluation needs has to be *in* the npz.
+
+---
+
+## Scripts
+
+| file | reads | writes | cost |
+|---|---|---|---|
+| `compare_spikes.py` | an EDF (via the trials JSON) | `runs/<id>.npz`, `figures/real/<id>/compare_raster.png` | ~5 min (Delphos), seconds if cached |
+| `evaluate_detectors.py` | an npz | 4 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
+| `spike_statistics.py` | an npz | 3 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
+| `stim_effect.py` | a **stim** npz | `figures/real/<run>/stim_effect.png` | seconds |
+| `stim_artefact_check.py` | a **stim** npz + its EDF | `figures/real/<run>/stim_artefact_check.png` | ~1 min |
+| `polyspike_review.py` | the ARCHIVED 20 ms npz + the EDF | 6 × `figures/real/polyspike_review/*.png` | ~1 min |
+| `sim_data.py` | `sim_noise_model.mat` | `sim_data/*.edf` + `.truth.npz`, preview figures | ~1 min, 38 MB/level |
+| `run_sim_suite.py` | — | `sim_runs/*.npz` (drives `compare_spikes.py` per job) | ~40 min uncached |
+| `score_sim_detectors.py` | `sim_runs/*.npz` | 6 × `figures/sim/_summary/sim_*.png` | seconds |
+| `spike_match.py` | — | — | the one greedy matcher, shared by agreement *and* accuracy |
+| `cond.py` | — | — | stim ON/OFF subsetting + the gap-aware time base it forces |
+| `janca_detect_spikes.py`, `delphos_detect_spikes.py` | — | — | detector wrappers |
+| `test_sim_data.py`, `test_score_sim.py`, `test_delphos_detect_spikes.py`, `test_cond.py` | — | — | plain scripts, no pytest; `<10 s` |
+
+Run everything through the venv: `.venv\Scripts\python.exe <script>.py`.
+The evaluation scripts take an optional npz path: `python evaluate_detectors.py sim_runs/<x>.npz`
+sends the figures to `figures/sim/<run>/` instead of `figures/real/<run>/`.
+
+`compare_spikes.py` picks its recording from `$RECORDING` (`P1_pre`, `P1_stim`, …), one npz each.
+
+### Restricting to stim ON or OFF
+
+On an intermittent-stim recording, `$COND` restricts an evaluation to the stim-ON or stim-OFF
+blocks. Figures gain an `_on` / `_off` suffix, so a split never overwrites the whole-window ones:
+
+```
+COND=on  python spike_statistics.py   runs/P1_stim.npz
+COND=off python evaluate_detectors.py runs/P1_stim.npz
+```
+
+**This is not just a filter on the detections, and that is the whole reason `cond.py` exists.**
+The ON subset is a handful of separated blocks, not a shorter recording, so three things go
+wrong quietly — each still produces a number, just the wrong one:
+
+| | what breaks | why it is not obvious |
+|---|---|---|
+| rate | the denominator is the ON seconds, not `seconds` | off by exactly the duty cycle — 3.1× on P1 |
+| ISI | an interval from the last spike before an OFF block to the first one after it | it is *large*, so it lands in the tail and inflates the CV instead of looking wrong |
+| any binned estimate | a bin straddling a boundary is part ON, part OFF | it is systematically **low**, which reads as a real drop in rate |
+
+So `cond.Selection` works in **segments**: `isis()` never diffs across a boundary, and `bins()`
+only returns bins lying *entirely* inside one segment (a bin that would be cut short is dropped,
+not shortened, so every bin is still the same amount of time). The boundaries come from the
+`on_runs` key, written by `compare_spikes.py`; a run made before that key existed raises rather
+than guessing. There is deliberately **no "concatenate the ON blocks" mode** — it would make all
+of the above work by construction, and every interval it invented would be a lie about a gap
+that really happened.
+
+`COND=on` on a baseline recording is an error, not an empty plot.
+
+---
+
+## Config that matters, and why
+
+**`MERGE_MS = 100`** (`compare_spikes.py`) — the shared polyspike rule; marks closer than this
+collapse to one, for all three detectors. This is the single most consequential setting.
+
+- It exists because the detectors *count* differently: Delphos detects a TF **blob**, so a
+  polyspike run inside one blob is one detection and it has no sub-blob events to expose,
+  while Janča marks every component. At a 20 ms floor the fraction of inter-detection intervals
+  under 50 ms was Janča **15.1%**, Barkmeier 2.8%, Delphos 1.6% — a counting convention, not a
+  difference in what was found.
+- Merging can only move Janča and Barkmeier *toward* Delphos; nothing moves Delphos the other
+  way. So the comparison is at **event** level, not component level, by necessity.
+- **100 ms is not settled for real data.** It was chosen as a working value under Janča's
+  published 120 ms default. Work through `figures/real/polyspike_review/` before defending it.
+
+**`JANCA_PT`** is *derived* from `MERGE_MS`, not set to `MERGE_MS/1000`. Janča's internal union
+is a morphological closing that merges `d <= L` and rounds odd, so the naive value gives a
+25 ms floor when 20 ms was asked for. `_janca_pt()` compensates. Verify with the minimum
+inter-detection interval in the npz: **it must be identical for all three detectors.**
+
+**`BARK["TAMP"] = 1200` is NOT in µV.** `mDetectSpike.m:284` rescales each block by
+`100 / median(mean(abs(EEG)))` first. Measured on real P1 that factor is **7.02**, so
+TAMP=1200 means ≈**171 µV** of summed half-heights — which sits right on the real median spike
+(197 µV peak-to-peak). Do not move it for a simulation experiment; sim-specific operating
+points belong in `run_sim_suite.SWEEPS`.
+
+**`DETECT_FS = 400`** — Janča and Barkmeier run here; Delphos runs on the raw 2 kHz file
+because it is a compiled binary that reads the file itself. **`TOL_MS = 50`** is the agreement
+tolerance. **`DELPHOS["pin_free_ram_gb"] = 12`** pins Delphos's internal tiling, which is
+RAM-dependent and therefore not bit-reproducible between operating points.
+
+---
+
+## Outputs
+
+One **folder per run**, routed by whether the npz says it is simulated:
+
+```
+figures/real/P1_pre/            per-recording evaluation (compare_raster + 7 eval_*)
+figures/real/polyspike_review/  merge-cutoff review, from the archived 20 ms detections
+figures/real/_sweeps/           historical parameter sweeps
+figures/sim/_summary/           aggregates ACROSS sim runs (sim_*)
+figures/sim/<sim run>/          per-SNR-level evaluation
+```
+
+Filenames are plain inside each folder -- the folder carries the identity, so `P5_stim`
+cannot overwrite `P1_pre`. Routing reads the `simulated` key from the npz rather than guessing
+from the path.
+
+| figure | answers |
+|---|---|
+| `compare_raster.png` | where each detector fired, population rate over time |
+| `eval_rate_scatter.png` | per-channel rate, detector vs detector, against y=x |
+| `eval_rank_scatter.png` | is the spikiest channel the same channel? |
+| `eval_reliability.png` | self-consistency, and observed agreement against its ceiling |
+| `eval_binned_rates.png` | is a channel's rate steady or driven by one burst? |
+| `eval_spike_structure.png` | ISI distribution + Fano vs timescale (`_LINEAR` = linear x-axis) |
+| `eval_block_stability.png` | does the detector **track** the recording minute to minute? |
+| `eval_bin_width.png` | how long must a bin be for a usable rate estimate? |
+| `stim_effect.png` | what each detector says stimulation did — paired ON vs OFF per channel, effect size, and whether every ON block dips |
+| `stim_artefact_check.png` | rough triage: does each detector's ON/OFF ratio track how much stim power that channel picked up? |
+| `polyspike_*.png` | real polyspike candidates by inter-mark gap, for choosing `MERGE_MS` |
+| `sim_metrics_vs_snr.png` | recall / precision / F1 / FP-rate vs SNR against ground truth |
+| `sim_sweep_curves.png` | does each Barkmeier knob do anything? |
+| `sim_per_channel.png` | per-channel performance vs channel noise |
+| `sim_preview_snr*.png` | what the simulated data actually looks like |
+| `sim_inband_snr.png` | what each detector's passband sees of the template |
+
+---
+
+## Findings
+
+All on P1 baseline (`runs/P1_pre.npz`), 600 s, 226 bipolar channels, unless stated.
+Counts: Janča 15934 | Barkmeier 11891 | Delphos 16199.
+
+**These numbers post-date the preprocessing fixes** (native-rate QC, `med_kernel=1`,
+`fill_bad_samples=False`). Earlier figures in the history used 400 Hz QC with the median filter
+on and Barkmeier's input AR-filled; the staged deltas were Janča 15918→15934, Barkmeier
+12777→11891, Delphos 17193→16199. Anything quoting the old triple is pre-fix.
+
+They also post-date the **analysable-time denominator**: a per-channel rate divides by that
+channel's unmasked seconds (`clean_sec_*`), not by the window length. On the baseline this moves
+almost nothing (1 channel of 226 is fully masked, ρ 0.740→0.737); on a stim recording it is the
+difference between a real result and an artefact, see below.
+
+| # | finding | evidence |
+|---|---|---|
+| 1 | Janča–Delphos rank agreement is high; Barkmeier agrees with neither | ρ **0.737** / 0.403 / 0.146 — `eval_rank_scatter.png`. Holds in **both** stim conditions: OFF 0.826/0.497/0.365, ON 0.634/0.337/0.069 |
+| 2 | Barkmeier is the most *self*-consistent yet agrees least, so its disagreement is systematic, not noise | self-ρ **0.952** vs 0.907 / 0.837 — `eval_reliability.png` |
+| 3 | **Barkmeier tracks activity least** | per-minute CV **0.129** (4.4× Poisson) vs Janča 0.189 (7.5×) and Delphos 0.371 (14.9×) — `eval_block_stability.png`. Weaker than the pre-fix numbers (0.065 / 0.197 / 0.408) and **not yet reproduced on a second recording**: in P1_stim's OFF blocks Barkmeier is 0.143 against Janča's 0.141, though from only 4 blocks |
+| 8 | **The three detectors disagree about the sign of the stimulation effect** | ON/OFF rate ratio over analysable time on the 132 channels measurable in both: Janča 0.57, Barkmeier **0.31**, Delphos **0.90** (median per-channel 0.55 / 0.24 / 1.24) — `stim_effect.png` |
+| 9 | **All three ON/OFF numbers are contaminated, in opposite directions** | Rank correlation of each detector's ON/OFF ratio against that channel's extra broadband (20–200 Hz) power during stim: Janča **+0.34**, Delphos **+0.34**, Barkmeier **−0.19** — `stim_artefact_check.png`. Janča and Delphos held their counts up where power went up; Barkmeier lost counts there. Neither the 0.31 nor the 0.90 is a clean measurement of what stimulation did |
+| 4 | **Barkmeier marks ~40 ms late** | sim +39→+42 ms, stable across SNR; real median \|Δt\| 15 ms for both Barkmeier pairs vs 5 ms Janča–Delphos |
+| 5 | Delphos merges polyspikes by construction | sub-50 ms ISI 15.1% / 2.8% / 1.6% at a 20 ms floor (see `archive/detections_merge20.npz`) |
+| 6 | On synthetic ground truth at event level, Janča and Delphos are close; Barkmeier's deficit is recall, not false positives | at 150 ms merge, SNR 12: 0.949/0.961, 0.931/0.995, **0.551/1.000** |
+| 7 | Real-data Fano peaks (~3.5) are physiology, not counting policy | ground truth measures Fano ≈ 1 at every width and all three detectors reproduce it |
+
+**Finding 9's Barkmeier sign is finding 3's mechanism, arriving independently.** `mDetectSpike.m:291`
+computes `thresh = -mean(|fEEG|) - 4*std(|fEEG|)` from each block's own data, so a channel with
+more broadband power during stim raises its own bar and loses detections — which is exactly the
+negative correlation measured. The same mechanism was inferred on the baseline from a completely
+different axis (per-minute count stability), and on the simulation from a rate/recall correlation.
+
+**Findings 3 and 4 both trace to `mDetectSpike.m`:**
+
+- `:291` — `thresh = -mean(|fEEG|) - 4*std(|fEEG|)`, computed **per 1-minute block from that
+  block's own data**. More spikes → higher bar. Measured on the sim: the threshold rises
+  **2.65×** from the 2/min channel to the 30/min channel with identical spikes on both, and
+  per-channel recall correlates **−0.959** with rate (noise controlled) against −0.44 and −0.25
+  for the others. This also explains why no Barkmeier knob helps — `TAMP`, `LD`, `RD`, `LS`,
+  `RS` are all applied *downstream* of a peak that never crossed threshold.
+- `:332` — the reported time is `spikeI = max(EEG[newPeakI-20ms : newPeakI])`, a **20 ms
+  look-back** from the 20–50 Hz negative lobe. Once that lobe sits more than 20 ms after the
+  true peak, the peak is unreachable.
+
+---
+
+## Corrections — things that were wrong, so they are not re-derived
+
+- **The simulated template had a step discontinuity.** It was truncated at −0.19 of peak, so
+  every injected spike ended in a sharp edge that Delphos correctly detected. This made Delphos
+  look imprecise. Fixing it moved its SNR-12 precision **0.810 → 0.997** and reversed the
+  conclusion about which detector is cleanest.
+- **`TAMP` is not in µV** (see above). Two measurements that looked contradictory were in
+  different units.
+- **The +40 ms lag is not `trough_search_ms`.** `mDetectSpike.m:332` returns a *positive* peak
+  from a 20 ms look-back; `trough_search_ms` only feeds `Lamp`/`Ramp`/`Ldur`/`Rdur`.
+- **The stim disagreement is not Delphos-specific.** The first reading of finding 8 was that
+  Delphos's flat ON/OFF ratio came from 145 Hz artefact surviving into its 8–512 Hz band while
+  the other two never saw it. Measured, that is wrong in two ways: Janča tracks contamination
+  just as strongly (+0.34 broadband, against Delphos's +0.34), and Barkmeier tracks it in the
+  *opposite* direction. The stim spectrum is lifted at **every** frequency, not only at the
+  145/290/435/580 Hz harmonics, so a narrowband story was never going to be the whole one.
+- **There is no Fano "cliff at 60 s".** The raw curve turns down at 10–20 s, and that is an
+  estimator artefact — a rate-matched Poisson control measures 0.80 at 10 bins and 0.70 at 5.
+  Bias-corrected, Barkmeier matches Janča to 40 s. The strong evidence for its flat activity
+  tracking is `eval_block_stability.png`, not the Fano tail.
+- **Window-based specificity and ROC-AUC saturate** — the imbalance is ~39:1 at 100 ms bins, so
+  everything scores ≥0.97 and ~0.99 regardless of quality. The event-based table is the
+  headline; the window accounting exists only because specificity needs a defined true negative.
+
+---
+
+## Known limits and open items
+
+- **`MERGE_MS` is unsettled for real data.** See `polyspike_*.png`. The sim currently runs at
+  150 ms while the real data is at 100, so **the sim is not a matched calibration until it is
+  re-run at the same value.**
+- **Barkmeier's simulated numbers are morphology-dependent.** Its timing reference moved 55 ms
+  when only the template's after-wave changed, and every shape knob is inert on a smooth
+  Gaussian. Treat its sim results as statements about waveform matching, not clinical
+  sensitivity.
+- **The `block_size_min` test has not been run.** Finding 3's mechanism is supported by a
+  correlational figure; changing Barkmeier's block size is the falsifying experiment.
+- **FIXED: the two input asymmetries.** `fill_bad_samples=False` and `med_kernel=1` now give
+  all three detectors the same array. The AR fill had been inflating Barkmeier by ~6% (12646 →
+  11891); the median filter had been manufacturing ~2300 Janča detections inside artefact.
+- **FIXED: QC now runs at the native 2 kHz.** The 400 Hz QC was *under*-masking, and not for
+  the reason first assumed: `gradThr` is per-sample, so for content below the new Nyquist both
+  the threshold and `max|diff|` scale identically and the rate cancels. What does not cancel is
+  that decimation *deletes* everything above 200 Hz — exactly the sharp artefact the rule
+  exists to catch. Delphos moved most (mask attrition 6% → 13%) because it detects in 8–512 Hz.
+- **Stim-ON is measured on 132 of 226 channels.** The artefact mask leaves **94 channels with
+  zero analysable time** during P1's stim blocks (whole shafts, B among them). They are excluded
+  rather than counted as 0 Hz, so any ON/OFF comparison must be restricted to the channels
+  measurable in *both* conditions — comparing ON's 132 against OFF's 224 is not like for like.
+- **Q1b cannot run on P1's stim-ON.** It needs ≥4 blocks of 60 s and the ON condition is three
+  ~65 s segments, so `eval_block_stability_on.png` is not drawn and finding 3's strongest
+  intended test — does stim artefact inflate Barkmeier's per-block threshold further — is still
+  unrun. A longer stim file, or a second patient, is the way to get it.
+- **`polyspike_review.py` has no COND support.** It needs the archived 20 ms npz and a hardcoded
+  baseline EDF path, so reviewing polyspikes under stimulation is a separate job.
+- `archive/` holds superseded runs: `detections_merge20.npz` (the under-merged real detections
+  that `polyspike_review.py` needs) and five earlier simulated generations.
+
+---
+
+## Requirements
+
+- venv at `.venv`; `numpy`, `scipy`, `matplotlib`, `mne`, and `seeg-pipeline` (editable, from
+  `python_pipeline`).
+- **Barkmeier** needs a local MATLAB install with the engine. Without it that arm is skipped
+  and the comparison degrades to two detectors.
+- **Delphos** needs **MATLAB Runtime 9.13 (R2022b)** — *not* the 9.5/R2018b the bundled
+  `readme.txt` claims. Failure signature is exit −1 with no output at all. Results are memoised
+  in `.delphos_cache/` keyed on (resolved path, file size, window, parameters); a call is
+  ~5 min, so treat that cache as valuable. It is **not bit-reproducible** — Delphos tiles
+  internally based on free RAM, hence `pin_free_ram_gb`.
+- `sim_data/` (~250 MB of synthetic EDFs) is gitignored and regenerable in ~1 min; the config
+  hash in each filename means a changed generator can never silently reuse an old cache entry.

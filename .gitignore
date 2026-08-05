@@ -24,6 +24,19 @@ detections.npz
 #                     detections cannot be recreated. Track it deliberately if a
 #                     specific run needs to be preserved alongside its figures.
 .delphos_cache/
+#
+# sim_data/       -- synthetic EDFs, ~38 MB each x 6 SNR levels. Fully regenerable and BIT
+#                    REPRODUCIBLE (unlike Delphos): `python sim_data.py` rebuilds them, and the
+#                    generator config is hashed into every filename, so a rebuilt file with the
+#                    same name IS the same data. The .truth.npz sidecars live here too and go
+#                    with them -- the ground truth is also copied into every sim_runs/*.npz,
+#                    which IS tracked, so nothing needed for scoring is lost.
+sim_data/
+#
+# sim_runs/*.npz is deliberately NOT ignored: one file per (SNR, operating point), ~150 kB,
+# written once rather than on every run, and the only record of Delphos detections that cannot
+# be reproduced bit-for-bit. Same reasoning as the .delphos_cache note above, opposite call --
+# these are small and stable enough to keep.
 
 # Delphos also drops these next to the input when output_dir is reused by hand
 *_delphos.mat

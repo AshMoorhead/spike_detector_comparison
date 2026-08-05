@@ -194,7 +194,13 @@ MERGE_MS = 100.0      # shared polyspike rule: marks closer than this collapse t
                       # interval in detections.npz: it must be the same for all three.
 TOL_MS = 50           # agreement tolerance
 INTERACTIVE = False   # open the scroll/zoom viewer after the baseline run
-RUN_DELPHOS = True    # False -> skip the Delphos arm entirely (2-panel raster, as before)
+RUN_DELPHOS = os.environ.get("RUN_DELPHOS", "1") == "1"
+                      # False -> skip the Delphos arm entirely (2-panel raster, as before).
+                      # run_windows.py sets RUN_DELPHOS=0 for every window and runs Delphos
+                      # ONCE over the assembled whole-file EDF instead: it already tiles
+                      # internally on free RAM, so windowing it would add process overhead
+                      # AND re-whiten its time-frequency plane far more often than needed,
+                      # making its normalisation depend on OUR window size.
 
 VIOLET = "#4a3aa7"    # Delphos; from the QC palette -- third hue, no red/green pairing
 
@@ -330,7 +336,27 @@ if not SIMULATE:
 
 hdr = read_edf_header(EDF)
 FACTOR = int(round(hdr["SampleRate"] / DETECT_FS))
-rec = load_edf_segment(EDF, hdr, start_rec=1, stop_rec=SECONDS)
+
+# WHICH RECORDS. Default is the first SECONDS of the file, which is what every result up to
+# this point used. run_windows.py drives START_REC/STOP_REC to walk a whole recording in
+# RAM-sized windows -- the files are 652-3742 s and P5_stim alone is 12 GB at native rate, so
+# a whole-file load is not an option. Records are 1 s and the bounds are 1-based inclusive,
+# matching seeg.edf.window_bounds and load_edf_segment.
+START_REC = int(os.environ.get("START_REC", 1))
+STOP_REC = int(os.environ.get("STOP_REC", SECONDS))
+SECONDS = STOP_REC - START_REC + 1          # everything downstream measures THIS window
+WINDOW_TAG = os.environ.get("WINDOW_TAG", "")   # set by the driver; keeps per-window outputs
+                                                # from overwriting each other
+DUMP_DEC = os.environ.get("DUMP_DEC", "")
+                      # path to save the decimated (post-median, post-montage) array to.
+                      # The driver concatenates these across windows and writes ONE EDF
+                      # for Delphos. Saved WHOLE, not trimmed: the driver owns the
+                      # overlap arithmetic, so this stays a plain "process these
+                      # records" script with no notion of windowing semantics.
+if WINDOW_TAG:
+    DETECTIONS_NPZ = DETECTIONS_NPZ.with_name(f"{DETECTIONS_NPZ.stem}{WINDOW_TAG}.npz")
+    print(f"[window] records {START_REC}-{STOP_REC} ({SECONDS}s) -> {DETECTIONS_NPZ.name}")
+rec = load_edf_segment(EDF, hdr, start_rec=START_REC, stop_rec=STOP_REC)
 
 if not SIMULATE:
     # derive_montage's contact regex matches SIM1..SIM16 and WOULD build 15 pairs
@@ -457,13 +483,14 @@ else:                                              # contributes its own open/cl
 # the whole reason to reuse it -- a silently wrong EDF would cost a 5-minute Delphos call to
 # discover, and would look like a Delphos result rather than a writer bug.
 PREP_EDF = None
-if PREP_DELPHOS and not SIMULATE:
+if PREP_DELPHOS and RUN_DELPHOS and not SIMULATE:
     from sdc.detect.sim_data import write_edf, verify_edf
     _prep_dir = _ROOT / "prep_edf"
     _prep_dir.mkdir(parents=True, exist_ok=True)
     # Name carries everything that changes the CONTENT, so a stale file can never be picked up
     # after a config change -- and so Delphos's cache (keyed on path + size) cannot collide.
-    PREP_EDF = str(_prep_dir / f"{REC_META['rec_id']}_med{MED_KERNEL}_{fs:g}Hz_{SECONDS}s.edf")
+    PREP_EDF = str(_prep_dir / f"{REC_META['rec_id']}{WINDOW_TAG}"
+                   f"_med{MED_KERNEL}_{fs:g}Hz_{START_REC}-{STOP_REC}.edf")
     if Path(PREP_EDF).is_file():
         print(f"[prep] reusing {Path(PREP_EDF).name}")
     else:
@@ -473,6 +500,32 @@ if PREP_DELPHOS and not SIMULATE:
         verify_edf(PREP_EDF, dec["data"], list(names), fs)
         print(f"[prep] verified: round-trips through both pipeline readers")
 
+
+if DUMP_DEC:
+    Path(DUMP_DEC).parent.mkdir(parents=True, exist_ok=True)
+    # Per-SECOND clean-sample counts per channel, so the driver can compute analysable time
+    # over an arbitrary interior EXACTLY rather than scaling a whole-window fraction. Interiors
+    # always fall on whole seconds, so 1 s granularity loses nothing. ~110 kB per window
+    # against ~55 MB for the mask itself, which is why it is counts and not the mask.
+    _sps = int(round(fs))
+    _n_sec = dmask.shape[0] // _sps
+    _clean = (~dmask[:_n_sec * _sps]).reshape(_n_sec, _sps, -1).sum(axis=1).astype(np.uint16)
+    np.save(str(Path(DUMP_DEC).with_suffix("")) + "_clean.npy", _clean)
+    _on = (ON_MASK[:_n_sec * _sps].reshape(_n_sec, _sps).any(axis=1)
+           if ON_MASK.any() else np.zeros(_n_sec, bool))
+    np.save(str(Path(DUMP_DEC).with_suffix("")) + "_on.npy", _on)
+    # The DILATED ARTEFACT MASK itself, packed to 1 bit per sample. Needed because
+    # Delphos is run by the driver over the assembled file and must go through the SAME
+    # mask as the other two -- without this it is the only unmasked arm, which is the
+    # exact asymmetry the shared mask exists to remove.
+    np.save(str(Path(DUMP_DEC).with_suffix("")) + "_mask.npy",
+            np.packbits(dmask, axis=0))
+    np.save(str(Path(DUMP_DEC).with_suffix("")) + "_maskshape.npy",
+            np.array(dmask.shape, np.int64))
+    # float32: the EDF this ends up in is int16, so float64 would be 2x the disk and
+    # the bytes would be discarded by write_edf's quantisation anyway.
+    np.save(DUMP_DEC, dec["data"].astype(np.float32))
+    print(f"[dump] {Path(DUMP_DEC).name}  {dec['data'].shape} at {fs:g} Hz")
 
 _SAMPLE_MS = 1000.0 / fs
 if MERGE_MS and MERGE_MS < _SAMPLE_MS:
@@ -674,6 +727,7 @@ def _dump_detections(dets, path, extra=None):
                  "stim_hz": float(REC_META["stim_hz"]),
                  "sec_on": float(ON_MASK.sum() / fs),
                  "sec_off": float((~ON_MASK).sum() / fs),
+                 "start_rec": np.int64(START_REC), "stop_rec": np.int64(STOP_REC),
                  "on_runs": ON_RUNS,
                  # ANALYSABLE seconds per channel, per condition -- wall-clock seconds minus
                  # the dilated artefact mask. This is the denominator a rate actually needs and

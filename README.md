@@ -45,6 +45,8 @@ must not cost anything. Anything an evaluation needs has to be *in* the npz.
 | `spike_statistics.py` | an npz | 3 × `figures/<real\|sim>/<run>/eval_*.png` | seconds |
 | `stim_effect.py` | a **stim** npz | `figures/real/<run>/stim_effect.png` | seconds |
 | `stim_artefact_check.py` | a **stim** npz + its EDF | `figures/real/<run>/stim_artefact_check.png` | ~1 min |
+| `block_size_test.py` | an npz + its EDF | `figures/real/<run>/block_size_test.png` | ~10 min (MATLAB x4) |
+| `compare_recordings.py` | all of `runs/*.npz` | `figures/real/compare_recordings.png` | seconds |
 | `polyspike_review.py` | the ARCHIVED 20 ms npz + the EDF | 6 × `figures/real/polyspike_review/*.png` | ~1 min |
 | `sim_data.py` | `sim_noise_model.mat` | `sim_data/*.edf` + `.truth.npz`, preview figures | ~1 min, 38 MB/level |
 | `run_sim_suite.py` | — | `sim_runs/*.npz` (drives `compare_spikes.py` per job) | ~40 min uncached |
@@ -167,6 +169,28 @@ from the path.
 All on P1 baseline (`runs/P1_pre.npz`), 600 s, 226 bipolar channels, unless stated.
 Counts: Janča 15934 | Barkmeier 11891 | Delphos 16199.
 
+**Four recordings now exist**: `P1_pre`, `P1_stim`, `P5_pre`, `P5_stim` — two patients, each
+with a 600 s baseline and a 600 s ANT 145 Hz intermittent-stim file. P5 has 183 bipolar
+channels against P1's 226, and no channel correspondence between them, so cross-patient
+comparison is on summary statistics only, never per channel.
+
+### What replicated on the second patient
+
+| finding | P1 | P5 | verdict |
+|---|---|---|---|
+| 1 — Janča–Delphos rank agreement leads | ρ 0.737 vs 0.403 / 0.146 | ρ **0.831** vs **−0.036** / **−0.142** | **holds, and harder.** Janča–Delphos is stable at 0.83–0.87 across every recording and condition. Barkmeier on P5 has *no* relationship with either — and 0/10 top-10 overlap, with self-ρ 0.919, so it is reliably ranking channels, just ranking different ones |
+| 3 — Barkmeier tracks activity least | CV 0.129 vs 0.189 / 0.371 | CV **0.154** vs 0.301 / 0.417 | **holds, and more clearly.** On P5 the per-minute counts show Janča and Delphos swinging together from ~300 to ~900 while Barkmeier sits inside 371–653 throughout |
+| 8 — stimulation suppresses spikes | 0.57 / 0.31 / 0.90 | **1.08 / 1.01 / 1.21** | **does not replicate.** P5 shows no effect at all. Finding 8 is a property of the P1 recording, not of stimulation or of the detectors |
+
+Finding 8's collapse is the important one, and it is consistent with finding 9: P5's residual
+145 Hz contamination is *higher* than P1's (median +3.11 log2 against +0.92) yet its broadband
+correlations are all near zero (−0.01 / −0.12 / −0.13, against P1's +0.34 / −0.19 / +0.34).
+Whatever produced P1's ON/OFF split, more artefact is not sufficient to reproduce it.
+
+Q1b under stim-ON now runs on P5 (two ~129 s blocks give the four 60 s bins P1's three ~65 s
+blocks could not), but four bins make a CV estimate too noisy to rank detectors — reported, not
+relied on.
+
 **These numbers post-date the preprocessing fixes** (native-rate QC, `med_kernel=1`,
 `fill_bad_samples=False`). Earlier figures in the history used 400 Hz QC with the median filter
 on and Barkmeier's input AR-filled; the staged deltas were Janča 15918→15934, Barkmeier
@@ -189,6 +213,39 @@ difference between a real result and an artefact, see below.
 | 6 | On synthetic ground truth at event level, Janča and Delphos are close; Barkmeier's deficit is recall, not false positives | at 150 ms merge, SNR 12: 0.949/0.961, 0.931/0.995, **0.551/1.000** |
 | 7 | Real-data Fano peaks (~3.5) are physiology, not counting policy | ground truth measures Fano ≈ 1 at every width and all three detectors reproduce it |
 
+### Finding 3 is now causal, not correlational — and the direction was the surprise
+
+`block_size_test.py` re-runs Barkmeier across `block_size_min` and measures CV in FIXED 60 s
+bins, so the y-axis means the same thing at every x.
+
+| block_size_min | P1_pre total | CV/Poisson | P1_stim total | CV/Poisson | ON/OFF |
+|---|---|---|---|---|---|
+| 0.25 | 11944 | **2.7×** | 9952 | 10.2× | **0.47** |
+| 0.5 | 12175 | 3.8× | 10065 | 10.8× | 0.36 |
+| 1 (default) | 11891 | 4.4× | 9405 | 13.3× | 0.25 |
+| 2 | 11807 | **6.5×** | 8853 | **17.6×** | **0.22** |
+
+**The prediction recorded before running was that a SHORTER block would make Barkmeier track
+MORE. That was backwards.** CV rises monotonically *with* block size, on both recordings, while
+the total count barely moves (±3% on the baseline; ±12% on stim, so the control is weaker
+there). The correct reading: a short block adapts its threshold to that block's own activity —
+a busy 15 s window raises its own bar and loses detections, a quiet one lowers it and gains
+them — which **equalises** counts across blocks. A long block shares one threshold across more
+time, so variation inside it is never compensated and survives into the counts.
+
+So the per-block threshold is a flattener and shorter blocks flatten harder. Two consequences:
+
+- **Finding 3 is confirmed causally.** Changing one normalisation window moves Barkmeier from
+  2.7× to 6.5× Poisson, covering most of the distance to Janča's 7.5×. Its flatness is the
+  block size, not what it detects — and that makes it fixable, not just diagnosable.
+- **Finding 8's Barkmeier number is largely a block-size artefact.** The stim ON/OFF ratio
+  moves from 0.22 to 0.47 — more than 2× — purely by changing that window. The 0.31 reported
+  above is not a measurement of what stimulation did to spikes.
+
+Caveat on provenance: every non-default point depends on the stride bugfix below being correct.
+It is verified by the exact-reproduction guard at `block_size_min=1` (11891 on P1_pre, 9405 on
+P1_stim) plus reasoning, not by an independent implementation.
+
 **Finding 9's Barkmeier sign is finding 3's mechanism, arriving independently.** `mDetectSpike.m:291`
 computes `thresh = -mean(|fEEG|) - 4*std(|fEEG|)` from each block's own data, so a channel with
 more broadband power during stim raises its own bar and loses detections — which is exactly the
@@ -203,9 +260,24 @@ different axis (per-minute count stability), and on the simulation from a rate/r
   per-channel recall correlates **−0.959** with rate (noise controlled) against −0.44 and −0.25
   for the others. This also explains why no Barkmeier knob helps — `TAMP`, `LD`, `RD`, `LS`,
   `RS` are all applied *downstream* of a peak that never crossed threshold.
-- `:332` — the reported time is `spikeI = max(EEG[newPeakI-20ms : newPeakI])`, a **20 ms
+- `:300` — the reported time is `spikeI = max(EEG[newPeakI-20ms : newPeakI])`, a **20 ms
   look-back** from the 20–50 Hz negative lobe. Once that lobe sits more than 20 ms after the
-  true peak, the peak is unreachable.
+  true peak, the peak is unreachable. (`:332` assembles the index; the look-back is `:300`.)
+
+**Which file.** Line numbers above are the reference original,
+`seeg_analysis/shared_utils/mDetectSpike.m`. What actually executes is
+`python_pipeline/matlab/mDetectSpike_coeffs.m`, a derived variant where the same statements are
+at `:97`, `:104` and `:113`. Both were checked; they agree.
+
+**`block_size_min` was broken for every value except the default**, in the original and in the
+derived copy alike. The block *stride* was hardcoded `(CurrentBlock-1)*60*Fs` while the block
+*length* is `BlockSize*60*Fs` and the spike-index offset is `(CurrentBlock-1)*BlockSize*60*Fs`.
+The three only agree at `BlockSize == 1`. Below 1 the last blocks index past the end of the
+recording and MATLAB throws; above 1 the blocks silently **overlap**, the tail of the recording
+is never reached, and the reported indices are offset as if the stride had scaled. Fixed in
+`mDetectSpike_coeffs.m` by scaling the stride; `block_size_test.py` requires `block_size_min=1`
+to reproduce the stored count exactly, which is the proof the fix is a no-op at the default.
+`shared_utils/mDetectSpike.m` still has it.
 
 ---
 

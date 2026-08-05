@@ -65,7 +65,8 @@ if ON.clean_sec is None:
     raise SystemExit(f"{NPZ.name} has no clean_sec_on -- re-run compare_spikes.py so the "
                      f"rates can use analysable time rather than wall clock.")
 
-BOTH = (ON.clean_sec > 0) & (OFF.clean_sec > 0)
+BOTH = ON.measurable & OFF.measurable   # enough analysable time in BOTH conditions;
+                                        # see cond.Selection.MIN_CLEAN_FRAC
 print(f"{NPZ.name}: {ON.describe()}")
 print(f"{' ' * len(NPZ.name)}  {OFF.describe()}")
 print(f"[cond] {int(BOTH.sum())}/{n_chan} channels measurable in BOTH conditions "

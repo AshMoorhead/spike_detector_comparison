@@ -105,7 +105,7 @@ if not np.isfinite(stim_hz):
     raise SystemExit(f"{NPZ.name} is not a stim recording (stim_hz is nan).")
 
 ON, OFF = cond.select(z, "on"), cond.select(z, "off")
-BOTH = (ON.clean_sec > 0) & (OFF.clean_sec > 0)
+BOTH = ON.measurable & OFF.measurable   # see cond.Selection.MIN_CLEAN_FRAC
 edf = str(z["edf"])
 hdr = read_edf_header(edf)
 print(f"{NPZ.name}: {stim_hz:g} Hz stim, {ON.T:.0f}s ON / {OFF.T:.0f}s OFF, "

@@ -65,6 +65,28 @@ def test_isi_too_few_spikes():
     assert s.isis(np.zeros(0)).size == 0
 
 
+def test_rate_refuses_a_channel_with_almost_no_analysable_time():
+    """A near-fully-masked channel must give nan, not a huge rate.
+
+    Regression: on P1_pre, O7_O8 was 99.4% masked (3.88 s of 652). Its 8 detections divided by
+    3.88 s came out at 2.06 Hz and it was reported as the BUSIEST of 226 channels -- its rank
+    by raw count is 215th. `clean_sec > 0` was the gate; it is not enough."""
+    s = cond.Selection("all", np.array([[0.0, 600.0]]), 600.0, {"D": np.ones(3, bool)},
+                       clean_sec=np.array([600.0, 3.88, 60.0]))
+    r = s.rate([60, 8, 6])
+    assert np.isclose(r[0], 0.1)            # fully clean channel: unchanged
+    assert np.isnan(r[1]), r                # 0.65% analysable -> not measurable
+    assert np.isclose(r[2], 0.1)            # 10% analysable -> still measurable
+    assert list(s.measurable) == [True, False, True]
+
+
+def test_measurable_is_none_without_clean_sec():
+    """Runs predating clean_sec must still load; they fall back to wall clock."""
+    s = cond.Selection("all", np.array([[0.0, 600.0]]), 600.0, {"D": np.ones(2, bool)})
+    assert s.measurable is None
+    assert np.allclose(s.rate([60, 30]), [0.1, 0.05])
+
+
 # ---------------------------------------------------------------- bins inside segments
 def test_bins_stay_inside_one_segment():
     s = _sel([[0, 25], [30, 40]])
@@ -175,6 +197,8 @@ if __name__ == "__main__":
     test_isi_drops_spikes_in_the_gap()
     test_isi_boundary_is_half_open()
     test_isi_too_few_spikes()
+    test_rate_refuses_a_channel_with_almost_no_analysable_time()
+    test_measurable_is_none_without_clean_sec()
     test_bins_stay_inside_one_segment()
     test_bins_are_all_the_same_width()
     test_bins_none_fit()

@@ -57,6 +57,24 @@ class Selection:
         # key; then `rate` falls back to wall-clock and says so.
         self.clean_sec = None if clean_sec is None else np.asarray(clean_sec, float)
 
+    # A channel needs a MINIMUM of analysable time before a rate means anything. clean_sec > 0
+    # is not enough: on P1_pre, O7_O8 is 99.4% masked, leaving 3.88 s, and its 8 detections
+    # divided by that came out as 2.06 Hz -- reported as the BUSIEST channel of 226 when its
+    # rank by count is 215th. The project's own Q2 analysis says a quiet channel needs hundreds
+    # of seconds for a +-20% rate, so 5% of the recording is already generous; it is set here as
+    # a floor against absurdity, not as a sufficiency criterion.
+    MIN_CLEAN_FRAC = 0.05
+
+    @property
+    def measurable(self):
+        """Channels with enough artefact-free time for a rate to mean anything.
+
+        True everywhere when the run predates clean_sec, which keeps old runs loadable -- their
+        rates fall back to wall clock and are no worse than they were."""
+        if self.clean_sec is None:
+            return None
+        return self.clean_sec >= self.MIN_CLEAN_FRAC * self.T
+
     def rate(self, counts):
         """Per-channel rate in Hz, over ANALYSABLE time where that is known.
 
@@ -66,8 +84,9 @@ class Selection:
         counts = np.asarray(counts, float)
         if self.clean_sec is None:
             return counts / self.T
+        ok = self.measurable
         return np.divide(counts, self.clean_sec,
-                         out=np.full(counts.shape, np.nan), where=self.clean_sec > 0)
+                         out=np.full(counts.shape, np.nan), where=ok)
 
     def keep(self, det):
         """Bool mask over the flat {det}_idx array: is this detection in the condition?"""

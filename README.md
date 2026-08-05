@@ -100,6 +100,51 @@ that really happened.
 
 ## Config that matters, and why
 
+### Preprocessing: all three detectors on one signal (current canonical config)
+
+`MED_KERNEL=5` + anti-alias + decimate to **`DETECT_FS=1000` Hz**, written to an EDF that
+Delphos reads (`PREP_DELPHOS=1`). Before this, the three arms saw three *different* signals:
+
+| config | Janca | Barkmeier | Delphos | counts (P1_pre, 600 s) |
+|---|---|---|---|---|
+| old baseline | 400 Hz | 400 Hz | **2 kHz, raw file** | 15934 / 11891 / 16199 |
+| median off, preprocessed | 1 kHz | 1 kHz | 1 kHz | 17749 / 11941 / 15552 |
+| **median 5, preprocessed** | 1 kHz | 1 kHz | 1 kHz | **17270 / 12006 / 13310** |
+
+**The old "400 Hz" applied to Janca and Barkmeier only.** Delphos is a compiled binary that
+opens the EDF itself, so it read the raw 2 kHz file with nothing done to it -- full 8-512 Hz
+band while the other two were capped at a 200 Hz Nyquist. Its 16199 -> 15552 is therefore *not*
+a rate increase; it is losing everything above 500 Hz **and** reading our montage instead of
+building its own. That this cost only 4% says little of its detection mass lived above 500 Hz.
+
+Note `med_kernel=1` disables **only** the median -- the anti-alias FIR and the downsample still
+run, so "400 Hz, median off" was genuinely 400 Hz.
+
+**What the preprocessing does, measured** (`sdc/tools/lost_to_median.py`, `run_delta.py`):
+
+| change | Janca | Barkmeier | Delphos |
+|---|---|---|---|
+| 400 -> 1000 Hz (median off both) | **+11.4%** | +0.4% | n/a (2 kHz -> 1 kHz) |
+| median 1 -> 5 (all at 1 kHz) | -2.7% | +0.5% | **-14.4%** |
+
+The median hits Delphos ~5x harder than anything else, and that is not a coincidence: a 2.5 ms
+median is a **sharpness remover** and sharpness is what Delphos detects. Of the 4288 detections
+it drops, **85% are Delphos-only marks on a ~1 ms, 3.4-MAD impulse** sitting on an otherwise
+unremarkable background -- recording glitches. The remaining 15% are real, corroborated
+spike-and-slow-waves that *also* carried such an impulse: Delphos was triggered by the glitch
+riding on the discharge, so removing it loses the whole event. Net: ~3655 glitch detections
+removed for ~630 real ones, so the filter stays on. At kept detections the filter removes
+0.67 MAD -- identical to random time points, i.e. nothing. **A median(5) at 2 kHz cannot touch
+anything wider than ~1.25 ms, and an IED is 20-70 ms, so no real discharge can be erased by
+it** -- only a sharp artefact riding on one.
+
+Janca's +11.4% is the opposite case and looks like genuine sensitivity: those 2608 additions
+are sharp-transient-plus-slow-wave, corroborated at 32.5% against its own 69.5% baseline (vs
+14.8% for Delphos's glitches). At 1 kHz a 20 ms transient is 20 samples rather than 8, so
+envelope maxima that were smeared below threshold now cross it. The labelled BIDS data is what
+settles whether they are real.
+
+
 **`MERGE_MS = 100`** (`compare_spikes.py`) — the shared polyspike rule; marks closer than this
 collapse to one, for all three detectors. This is the single most consequential setting.
 

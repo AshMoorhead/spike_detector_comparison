@@ -296,3 +296,67 @@ def write_merged(m):
 if __name__ == "__main__":
     main()
     write_merged(merge_windows())
+
+
+def draw_raster(rec_id=None):
+    """One raster for the WHOLE assembled recording.
+
+    Separate from compare_spikes' raster, which is suppressed under WINDOW_TAG because a
+    per-window figure is a fragment written to the recording's path."""
+    import matplotlib.pyplot as plt
+    from seeg._style import RED, BLUE, MUTED, recessive
+    rec_id = rec_id or RECORDING
+    z = np.load(RUNS / f"{rec_id}.npz", allow_pickle=False)
+    names = [str(s) for s in z["names"]]
+    fs, T = float(z["fs"]), float(z["seconds"])
+    n_chan = len(names)
+    dets = [(d, c) for d, c in (("Janca", RED), ("Barkmeier", BLUE), ("Delphos", "#4a3aa7"))
+            if f"{d}_idx" in z.files]
+    per = {d: [np.sort(z[f"{d}_idx"][z[f"{d}_chan"] == k] / fs) for k in range(n_chan)]
+           for d, _ in dets}
+    order = np.argsort([-per[dets[0][0]][k].size for k in range(n_chan)])
+    edges = np.arange(0, T + 1, 1.0)
+    centres = edges[:-1] + 0.5
+
+    fig, axes = plt.subplots(len(dets) + 1, 1, sharex=True,
+                             figsize=(16, 5 + 3 * len(dets)),
+                             gridspec_kw={"height_ratios": [1] + [3] * len(dets)})
+    axr = axes[0]
+    for d, col in dets:
+        allt = np.concatenate([p for p in per[d] if p.size]) if any(p.size for p in per[d]) \
+            else np.zeros(0)
+        axr.plot(centres, np.histogram(allt, bins=edges)[0], color=col, lw=1.0,
+                 label=f"{d} ({sum(p.size for p in per[d])})")
+    axr.set_ylabel("pop. rate\n(spikes/s)")
+    axr.legend(loc="upper right", frameon=False, fontsize=8, ncol=len(dets))
+    recessive(axr)
+    on = z["on_runs"] / fs if "on_runs" in z.files else np.zeros((0, 2))
+    for a0, a1 in on:
+        for ax in axes:
+            ax.axvspan(a0, a1, color="#f0c419", alpha=.16, lw=0, zorder=0)
+    if on.size:
+        axr.text(.004, .96, "shaded = stim ON", transform=axr.transAxes, va="top",
+                 fontsize=8, color="#8a6d00")
+    for ax, (d, col) in zip(axes[1:], dets):
+        ax.eventplot([per[d][order[i]] for i in range(n_chan)], colors=col,
+                     lineoffsets=np.arange(n_chan), linelengths=0.8, linewidths=0.4)
+        ax.set_title(f"{d} (n={sum(p.size for p in per[d])})", loc="left", fontsize=10,
+                     color=col)
+        ax.set_ylabel("channel (busiest -> top)")
+        yt = np.arange(0, n_chan, max(n_chan // 20, 1))
+        ax.set_yticks(yt)
+        ax.set_yticklabels([names[order[i]] for i in yt], fontsize=6)
+        ax.set_ylim(n_chan, -1)
+        recessive(ax)
+    axes[-1].set_xlim(0, T)
+    axes[-1].set_xlabel("time (s)")
+    fig.suptitle(f"{rec_id}: whole recording, {T:.0f}s ({T/60:.1f} min), {n_chan} bipolar ch "
+                 f"at {fs:g} Hz  |  {int(z['n_windows'])} windows of "
+                 f"{int(z['window_sec'])}s for Janca/Barkmeier, Delphos in one pass",
+                 fontsize=11)
+    fig.tight_layout()
+    out = ROOT / "figures" / "real" / rec_id / "compare_raster.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+    print(f"[saved] {out}")

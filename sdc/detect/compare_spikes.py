@@ -891,6 +891,12 @@ elif SIMULATE:
     _RASTER = _HERE / "figures" / "sim" / DETECTIONS_NPZ.stem / "compare_raster.png"
 else:
     _RASTER = _HERE / "figures" / "real" / REC_META["rec_id"] / "compare_raster.png"
+if WINDOW_TAG:
+    # A per-window raster is a FRAGMENT, and every window writes to the same path -- so what
+    # survives on disk is whichever window finished last, mislabelled as the recording. That is
+    # worse than no figure: figures/real/P1_pre/compare_raster.png silently became 112 s of a
+    # 652 s file. run_windows draws one raster for the assembled recording instead.
+    _RASTER = None
 if _RASTER is not None:
     _RASTER.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(_RASTER, dpi=130)

@@ -218,6 +218,27 @@ from the path.
 All on P1 baseline (`runs/P1_pre.npz`), 600 s, 226 bipolar channels, unless stated.
 Counts: Janča 15934 | Barkmeier 11891 | Delphos 16199.
 
+### Now measured on WHOLE recordings (652 / 1097 / 2107 / 3742 s)
+
+All four run end to end via `sdc/detect/run_windows.py`. Janca and Barkmeier run per 240-300 s
+window; Delphos gets the assembled file in one pass. Counts:
+
+| | seconds | Janca | Barkmeier | Delphos |
+|---|---|---|---|---|
+| P1_pre | 652 | 18503 | 13159 | 14079 |
+| P1_stim | 1097 | 25611 | 17266 | 31811 |
+| P5_pre | 2107 | 31375 | 19940 | 24973 |
+| P5_stim | 3742 | 64773 | 42048 | 39542 |
+
+**All four findings hold in all six columns** (`figures/real/compare_recordings.png`):
+
+| finding | range across the six columns |
+|---|---|
+| 1 — Janca-Delphos leads | **0.75-0.90**, at 83-96% of ceiling. Barkmeier pairs never exceed 48% |
+| 2 — disagreement is systematic | self-rho 0.78-0.99, far above any cross-detector pairing. *Which* detector is most self-consistent is still recording-specific: Barkmeier on P1_pre, Janca on P5 |
+| 3 — Barkmeier tracks activity least | **lowest in all six**: 4.3-6.5x Poisson vs Janca 6.7-12.7x and Delphos 7.4-24.3x. The two exceptions seen on 600 s slices were small-sample artefacts -- full files give 10-62 blocks instead of 4 |
+| 4 — Barkmeier marks late | Janca-Barkmeier 13-16 ms vs Janca-Delphos 4-5 ms, everywhere. At 400 Hz this read as exactly 15.0 ms because one sample WAS 2.5 ms; at 1 kHz the spread is visible and the effect is unchanged |
+
 **Four recordings now exist**: `P1_pre`, `P1_stim`, `P5_pre`, `P5_stim` — two patients, each
 with a 600 s baseline and a 600 s ANT 145 Hz intermittent-stim file. P5 has 183 bipolar
 channels against P1's 226, and no channel correspondence between them, so cross-patient

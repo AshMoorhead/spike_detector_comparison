@@ -314,6 +314,20 @@ SWEEP_VALUES = [1.1, 1.3, 1.5]     # Delphos TF-power threshold; 40 = our defaul
 # Everything below this config block is shared with the real-data path on purpose: the whole
 # value of the sim is that the detectors, the artefact mask, the 20 ms merge and the npz dump
 # are byte-for-byte the ones used on the patient recording. See sim_data.py.
+# ---- LABELLED BENCHMARK: the same three detectors on data with EXPERT-MARKED spikes -------
+# BIDS_SUBJECT=sub-01 runs one subject of the BIDS iEEG sleep dataset (25 subjects, 852
+# expert-marked IEDs). This is the only arm scored against a human rather than against the
+# other detectors or against spikes we generated ourselves.
+#
+# THE DATA IS RUN EXACTLY AS IT IS: no median, no anti-alias, no decimation, NO MONTAGE.
+# Unmontaged is the important one -- the expert marks name monopolar contacts, so leaving it
+# unmontaged makes the channels BE the labelled channels. Montaging would force a
+# contact->pair mapping, and whether to credit one pair or both would silently set recall.
+# The cost is that it is scalp-referenced, so a discharge is common-mode across nearby
+# contacts: a caveat on the absolute numbers, not on the ranking between detectors.
+BIDS_SUBJECT = os.environ.get("BIDS_SUBJECT", "")
+BIDS_ROOT = Path(r"C:\Users\amoo0039\Documents\ieeg_ieds_bids_final\ieeg_ieds_bids")
+
 SIMULATE = False       # True -> build/load a sim EDF instead of the patient EDF
 SIMULATE = SIMULATE or os.environ.get("SIM_FORCE") == "1"   # run_sim_suite.py flips it per job
 SIM_SNR = float(os.environ.get("SIM_SNR", 8.0))          # which SNR level to run
@@ -327,7 +341,23 @@ SIM_RUNS = _ROOT / "sim_runs"
 
 # ----------------------------------------------------------------------
 _sim = None
-if SIMULATE:
+if BIDS_SUBJECT:
+    EDF = str(BIDS_ROOT / BIDS_SUBJECT / "ieeg" / f"{BIDS_SUBJECT}_task-sleep_ieeg.edf")
+    if not Path(EDF).is_file():
+        raise SystemExit(f"{EDF} not found")
+    _bhdr = read_edf_header(EDF)
+    SECONDS = int(_bhdr["NumDataRecords"] * _bhdr["DataRecordDuration"])
+    STOP_REC = SECONDS
+    DETECT_FS = float(_bhdr["SampleRate"])   # its OWN rate -> FACTOR 1 -> no decimation
+    MED_KERNEL = 1                           # and no median. Run as recorded.
+    TRIAL = None                             # sleep recording, no stimulation
+    DELPHOS = {**DELPHOS, "bipolar": False}  # already the channels the labels name
+    REC_META = dict(rec_id=f"bids_{BIDS_SUBJECT}", patient=-1, condition="bids",
+                    stim_hz=float("nan"))
+    DETECTIONS_NPZ = _ROOT / "runs" / f"bids_{BIDS_SUBJECT}.npz"
+    print(f"--- {BIDS_SUBJECT}: {SECONDS}s at {DETECT_FS:g} Hz, "
+          f"{_bhdr['NumSignals']} channels, unmontaged ---")
+elif SIMULATE:
     from sdc.detect import sim_data
     _sim = sim_data.ensure_sim_edf(snr=SIM_SNR)
     EDF = str(_sim["edf"])
@@ -344,10 +374,16 @@ if SIMULATE:
     DETECTIONS_NPZ = (SIM_RUNS / f"sim_{_sim['cfg']['tag']}_{sim_data.cfg_hash(_sim['cfg'])}"
                                  f"_snr{SIM_SNR:g}_{SIM_POINT}.npz")
 
-TRIAL = None            # the stim trial record, or None for baseline/'pre'
-REC_META = dict(rec_id="sim" if SIMULATE else RECORDING, patient=-1, condition="sim",
-                stim_hz=float("nan"))
-if not SIMULATE:
+# BIDS mode has already set TRIAL / REC_META / EDF / DETECTIONS_NPZ above and must not fall
+# through here. It did once: the block below re-resolved EDF from RECORDINGS, so a
+# BIDS_SUBJECT run silently analysed P1 instead -- 181 s of the wrong recording, written over
+# a control run. The variant naming protects against two CONFIGS colliding; it cannot protect
+# against a MODE falling through to the default recording. Hence the explicit guard.
+if not BIDS_SUBJECT:
+    TRIAL = None        # the stim trial record, or None for baseline/'pre'
+    REC_META = dict(rec_id="sim" if SIMULATE else RECORDING, patient=-1, condition="sim",
+                    stim_hz=float("nan"))
+if not SIMULATE and not BIDS_SUBJECT:
     _cfg = RECORDINGS[RECORDING]
     _entry = get_trial(get_patient(load_trials(META_PATH), _cfg["patient"]),
                        _cfg["trial_index"])
@@ -403,7 +439,7 @@ if WINDOW_TAG:
     print(f"[window] records {START_REC}-{STOP_REC} ({SECONDS}s) -> {DETECTIONS_NPZ.name}")
 rec = load_edf_segment(EDF, hdr, start_rec=START_REC, stop_rec=STOP_REC)
 
-if not SIMULATE:
+if not SIMULATE and not BIDS_SUBJECT:
     # derive_montage's contact regex matches SIM1..SIM16 and WOULD build 15 pairs
     # SIM1_SIM2, SIM2_SIM3, ... Re-montaging already-bipolar sim channels would smear every
     # ground-truth spike across two pairs with opposite polarity, so the sim skips this.
@@ -536,7 +572,7 @@ else:                                              # contributes its own open/cl
 # the whole reason to reuse it -- a silently wrong EDF would cost a 5-minute Delphos call to
 # discover, and would look like a Delphos result rather than a writer bug.
 PREP_EDF = None
-if PREP_DELPHOS and RUN_DELPHOS and not SIMULATE:
+if PREP_DELPHOS and RUN_DELPHOS and not SIMULATE and not BIDS_SUBJECT:
     from sdc.detect.sim_data import write_edf, verify_edf
     _prep_dir = _ROOT / "prep_edf"
     _prep_dir.mkdir(parents=True, exist_ok=True)
@@ -707,7 +743,10 @@ def run_delphos(label=None, **override):
 
     Marker positions are absolute file seconds either way, so passing `fs` converts them onto
     the detection axis; `_finalise` then applies the same mask and merge as the other two."""
-    src = PREP_EDF if PREP_DELPHOS else EDF
+    # PREP_EDF is None when no preprocessed file was written -- BIDS mode runs the
+    # recording exactly as it is, so Delphos reads the original. Guarding on the PATH,
+    # not just the flag: with the flag alone this passed None and lost the arm.
+    src = PREP_EDF if (PREP_DELPHOS and PREP_EDF) else EDF
     cfg = {**DELPHOS, **override}
     if PREP_DELPHOS:
         # The preprocessed EDF is ALREADY bipolar. Delphos montages whatever it is given

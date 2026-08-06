@@ -20,11 +20,15 @@ Code interactive window run `%matplotlib tk` FIRST, or the figure is a dead PNG 
 do nothing.
 
 WHICH SIGNAL YOU ARE LOOKING AT
-  Default is the file the run npz points to, which for a windowed run is the PREPROCESSED EDF
-  -- post-montage, median-filtered, decimated. That is deliberately the default because it is
-  what the detectors actually saw, so what is on screen is what they responded to.
-  Set RAW = True to load the original recording at its native rate instead and montage it here.
-  Use that to ask "was this in the data, or did the preprocessing make it?".
+  The MAIN trace is the file the run npz points to -- for a windowed run, the PREPROCESSED EDF:
+  post-montage, median-filtered, decimated, and AR-filled inside the artefact mask. That is what
+  the detectors actually saw, so what is on screen is what they responded to.
+
+  With SHOW_RAW the ORIGINAL recording is drawn in grey behind it, montaged here and at its own
+  native rate. The gap between the two IS the preprocessing, which answers the question that
+  keeps coming up: "was this in the data, or did we make it?". Inside a masked region the grey
+  is real artefact and the black is the AR fill that replaced it -- the clearest available view
+  of what the fill is doing.
 """
 # %% ------------------------------------------------------------------ CONFIG: edit this
 NPZ = "runs/P1_stim.npz"       # any file in runs/
@@ -33,7 +37,11 @@ CHANNELS = None # ["L6_L7", "L5_L6", "L1_L2", "B1_B2", "B9_B10", "H14_H15", "T11
 T0 = 900.0                     # seconds from the start of the recording
 DURATION = 300.0                # seconds on screen
 GAIN = 1.0                     # vertical zoom; also adjustable live with up/down
-RAW = False                    # False: what the detectors saw. True: the original EDF.
+SHOW_RAW = True                # overlay the ORIGINAL recording in grey behind the trace the
+                               # detectors actually saw. This is the point of the script: it
+                               # shows what preprocessing did -- the median filter, the
+                               # decimation, and (most visibly) the AR fill replacing artefact
+                               # with synthesised noise. Toggle live with the "raw" checkbox.
 N_AUTO = 50                    # how many channels CHANNELS=None picks
 
 # %% ------------------------------------------------------------------
@@ -82,21 +90,33 @@ if missing:
     raise SystemExit(f"not in this recording: {missing}\nfirst few available: {names[:8]}")
 idx = [names.index(c) for c in chans]
 
-# ---- the signal ------------------------------------------------------------------------
-if RAW:
-    pid, ftype = RECORDINGS[str(z["rec_id"])]
-    stem, _ = resolve_file(get_trial(get_patient(load_trials(META_PATH), pid), 1), ftype)
-    edf = str(BASE_DIR / f"P{pid}" / f"{stem}.edf")
-else:
-    edf = str(z["edf"])
+# ---- the signal the detectors saw --------------------------------------------------------
+edf = str(z["edf"])
 hdr = read_edf_header(edf)
 r0 = max(int(T0), 0) + 1                                   # records are 1 s, 1-based inclusive
 r1 = min(int(np.ceil(T0 + DURATION)) + 1, int(hdr["NumDataRecords"]))
 rec = load_edf_segment(edf, hdr, r0, r1)
-if RAW:
-    rec = apply_montage(rec, derive_montage(rec["info"]["SelectedSignals"]))
 print(f"{Path(edf).name}: {rec['data'].shape[0]} samples x {rec['data'].shape[1]} ch "
-      f"at {rec['info']['SampleRate']:g} Hz   ({'RAW' if RAW else 'what the detectors saw'})")
+      f"at {rec['info']['SampleRate']:g} Hz   (what the detectors saw)")
+
+# ---- and the original, for the grey backdrop ---------------------------------------------
+raw_rec = None
+if SHOW_RAW:
+    pid, ftype = RECORDINGS[str(z["rec_id"])]
+    stem, _ = resolve_file(get_trial(get_patient(load_trials(META_PATH), pid), 1), ftype)
+    raw_edf = BASE_DIR / f"P{pid}" / f"{stem}.edf"
+    if raw_edf.is_file():
+        rhdr = read_edf_header(str(raw_edf))
+        # SAME record range, so the two start at the same instant -- the viewer indexes the
+        # backdrop by rate ratio from the main trace's start and would shear them otherwise.
+        raw_rec = load_edf_segment(str(raw_edf), rhdr, r0,
+                                   min(r1, int(rhdr["NumDataRecords"])))
+        raw_rec = apply_montage(raw_rec,
+                                derive_montage(raw_rec["info"]["SelectedSignals"], verbose=False),
+                                verbose=False)
+        print(f"{raw_edf.name}: backdrop at {raw_rec['info']['SampleRate']:g} Hz")
+    else:
+        print(f"[note] {raw_edf} not found -- no backdrop")
 
 # Keep only the requested channels, in the requested order.
 all_names = list(rec["info"]["SelectedSignals"])
@@ -106,6 +126,17 @@ if len(sub) != len(chans):
                      f"{[c for c in chans if c not in all_names]}")
 rec = {"data": rec["data"][:, sub],
        "info": {**rec["info"], "SelectedSignals": chans, "NumSelectedSignals": len(chans)}}
+
+# The viewer draws recording["raw"] in grey behind the main trace and gates it on the "raw"
+# checkbox. It requires the SAME channel count, so subset the backdrop identically.
+if raw_rec is not None:
+    rnames = list(raw_rec["info"]["SelectedSignals"])
+    if all(c in rnames for c in chans):
+        rec["raw"] = {"data": raw_rec["data"][:, [rnames.index(c) for c in chans]],
+                      "fs": raw_rec["info"]["SampleRate"]}
+    else:
+        print(f"[note] backdrop dropped: {[c for c in chans if c not in rnames]} not in the "
+              f"raw montage")
 
 # ---- detections, in the same channel order and on the VIEWER's clock ---------------------
 # The viewer's x axis starts at 0 for the loaded segment, so absolute detection times need the

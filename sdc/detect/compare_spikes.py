@@ -238,6 +238,11 @@ MERGE_MS = 100.0      # shared polyspike rule: marks closer than this collapse t
                       # interval in detections.npz: it must be the same for all three.
 TOL_MS = 50           # agreement tolerance
 INTERACTIVE = False   # open the scroll/zoom viewer after the baseline run
+ONLY = os.environ.get("ONLY", "").lower()
+                      # "janca" | "barkmeier" | "delphos" -> run ONLY that arm. A parameter
+                      # sweep moves one detector's knob, so running the other two at every grid
+                      # point is pure waste -- and for Barkmeier each run pays a fresh MATLAB
+                      # engine start. 25 subjects x 6 points x 2 idle detectors is hours.
 RUN_DELPHOS = os.environ.get("RUN_DELPHOS", "1") == "1"
                       # False -> skip the Delphos arm entirely (2-panel raster, as before).
                       # run_windows.py sets RUN_DELPHOS=0 for every window and runs Delphos
@@ -332,7 +337,12 @@ SIMULATE = False       # True -> build/load a sim EDF instead of the patient EDF
 SIMULATE = SIMULATE or os.environ.get("SIM_FORCE") == "1"   # run_sim_suite.py flips it per job
 SIM_SNR = float(os.environ.get("SIM_SNR", 8.0))          # which SNR level to run
 SIM_POINT = os.environ.get("SIM_POINT", "op")            # run label -> npz filename
-SIM_OVERRIDE = json.loads(os.environ.get("SIM_OVERRIDE", "") or "{}")   # {detector,param,value}
+# {detector, param, value} -- move ONE knob off its default for this run. Not sim-specific
+# despite the old name: it mutates the module-level detector dicts before the runners, so it
+# works in every mode. DET_OVERRIDE is the name to use; SIM_OVERRIDE stays as an alias because
+# run_sim_suite.py drives it.
+SIM_OVERRIDE = json.loads(os.environ.get("DET_OVERRIDE",
+                                         os.environ.get("SIM_OVERRIDE", "")) or "{}")
 SIM_CLEAN_MASK = True  # zero the QC mask (the sim contains no artefacts -- see below)
 SIM_RUNS = _ROOT / "sim_runs"
 # The env vars just DEFAULT to the constants above, so nothing changes when they are unset.
@@ -355,6 +365,12 @@ if BIDS_SUBJECT:
     REC_META = dict(rec_id=f"bids_{BIDS_SUBJECT}", patient=-1, condition="bids",
                     stim_hz=float("nan"))
     DETECTIONS_NPZ = _ROOT / "runs" / f"bids_{BIDS_SUBJECT}.npz"
+    if SIM_OVERRIDE:
+        # A sweep point is NOT the operating-point run and must never land on its filename.
+        _sw = _ROOT / "runs" / "sweeps"
+        _sw.mkdir(parents=True, exist_ok=True)
+        DETECTIONS_NPZ = _sw / (f"bids_{BIDS_SUBJECT}_{SIM_OVERRIDE['detector']}"
+                                f"_{SIM_OVERRIDE['param']}{SIM_OVERRIDE['value']:g}.npz")
     print(f"--- {BIDS_SUBJECT}: {SECONDS}s at {DETECT_FS:g} Hz, "
           f"{_bhdr['NumSignals']} channels, unmontaged ---")
 elif SIMULATE:
@@ -882,17 +898,24 @@ if SIM_OVERRIDE:
           f"{SIM_OVERRIDE['value']:g}")
 
 print(f"--- post-processing (identical for every detector) ---")
-janca = run_janca(dec["data"], label="Janca")
-dets = [("Janca", janca, RED)]
+# ONLY=<detector> runs one arm. A dropped arm is ABSENT from `dets`, never zero-filled: an
+# empty panel reads as "found nothing", which is a different claim from "not run".
+dets = []
+janca = [np.zeros(0, int) for _ in range(n_chan)]
+if ONLY in ("", "janca"):
+    janca = run_janca(dec["data"], label="Janca")
+    dets.append(("Janca", janca, RED))
 
-try:
-    bark = run_bark(dec, label="Barkmeier")
-    dets.append(("Barkmeier", bark, BLUE))
-except Exception as e:            # no MATLAB / engine failure -> skip that arm
-    print(f"[warn] Barkmeier unavailable ({type(e).__name__}: {e}); skipping that arm.")
-    bark = [np.zeros(0, int) for _ in range(n_chan)]
+bark = [np.zeros(0, int) for _ in range(n_chan)]
+if ONLY in ("", "barkmeier"):
+    try:
+        bark = run_bark(dec, label="Barkmeier")
+        dets.append(("Barkmeier", bark, BLUE))
+    except Exception as e:        # no MATLAB / engine failure -> skip that arm
+        print(f"[warn] Barkmeier unavailable ({type(e).__name__}: {e}); skipping that arm.")
+        bark = [np.zeros(0, int) for _ in range(n_chan)]
 
-if RUN_DELPHOS:
+if RUN_DELPHOS and ONLY in ("", "delphos"):
     try:
         delphos = run_delphos(label="Delphos")
         dets.append(("Delphos", delphos, VIOLET))

@@ -160,7 +160,12 @@ axb.text(.02, .97, "above 0 = more spikes during stim", transform=axb.transAxes,
 axb.set_xticks(range(len(dets)))
 axb.set_xticklabels(dets, fontsize=9)
 axb.set_ylabel("log2(ON rate / OFF rate), per channel")
-axb.set_title("(b) effect size per channel -- the detectors disagree on the SIGN",
+# The title used to assert "the detectors disagree on the SIGN". That was true of the 600 s
+# slices under the old preprocessing and is no longer true of anything: once all three share a
+# median-filtered input, P1 gives 0.39/0.30/0.27 and P5 0.57/0.56/0.54. A figure whose title
+# states the opposite of its own contents is worse than an unlabelled one, so it now describes
+# the axis and lets the boxes speak.
+axb.set_title("(b) effect size per channel -- below 0 is suppression during stim",
               fontsize=9, loc="left")
 recessive(axb)
 

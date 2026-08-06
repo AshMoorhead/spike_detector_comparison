@@ -247,6 +247,39 @@ Almost nothing moves all three the same way, which is what makes divergence read
 
 ---
 
+## Scored against 852 expert-marked IEDs
+
+`sdc/scoring/score_labelled.py` on the BIDS iEEG sleep dataset — 25 subjects, run exactly as
+recorded (no median, no decimation, no montage, so the channels ARE the labelled channels).
+**The only measurement here against a human rather than against the other detectors.**
+
+| | recall | precision (LOWER BOUND) | timing bias |
+|---|---|---|---|
+| **Janča** | **0.689** [0.67–0.70] | 0.156 | **+2.0 ms** |
+| Delphos | 0.542 [0.53–0.56] | 0.209 | +3.2 ms |
+| Barkmeier | **0.426** [0.41–0.44] | **0.254** | **+13.1 ms** |
+
+**Finding 4 confirmed against a human.** Barkmeier's lag is **+13.1 ms** against +2.0 and
++3.2 — a third independent confirmation, after the simulation (+39→+42 ms on a different
+waveform) and cross-detector agreement (13–16 ms). Janča and Delphos both land within ~3 ms of
+where a neurologist clicked.
+
+**Finding 10 needs qualifying: Barkmeier is selective AND insensitive.** Its EZ concentration
+is real, but it **misses 57% of expert-marked discharges**. Higher precision at 0.254 is
+consistent with selectivity, and the trade is steep — the recall gap to Janča is 26 points.
+Whether that trade is worth taking depends on the use: for *localisation* the EZ ranking says
+Barkmeier, for *finding the discharges* the expert marks say Janča.
+
+**Precision is a lower bound, not a false-positive rate.** The experts marked notable
+discharges in a 3-minute window, not every transient, so an unmatched detection is "not on
+their list" rather than "wrong". Compare precision BETWEEN detectors; never quote it alone.
+
+**Per-subject spread is large** (panel a: recall 0.03–0.92) and the ordering is not universal —
+Janča leads on most subjects but not all. 10–61 events per subject is thin, which is why the
+pooled Wilson intervals and the per-subject curve are both shown.
+
+---
+
 ## Findings
 
 All on P1 baseline (`runs/P1_pre.npz`), 600 s, 226 bipolar channels, unless stated.

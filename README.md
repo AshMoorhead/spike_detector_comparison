@@ -280,6 +280,47 @@ pooled Wilson intervals and the per-subject curve are both shown.
 
 ---
 
+## Operating points, set against the expert marks
+
+`sdc/scoring/sweep_labelled.py` then `pick_operating_point.py`. `BARK["TAMP"]=1200` was
+"tuned to match Janča's count" on P1 — which makes Janča the definition of correct, and does
+not transfer: on this dataset it lands at **less than half** Janča's detection rate.
+
+**Compare at a matched DETECTION BUDGET, never at defaults.** All three sweep curves are
+monotone with no interior optimum — correct for a sensitivity dial, and it means "maximise
+recall" alone would just pick the lowest threshold. Precision here is a lower bound, so
+maximising F1 would optimise towards the *annotation's sparsity* instead of the truth. So: fix
+detections per channel-minute, then ask who finds the most expert marks inside it.
+
+| recall at budget (det/chan-min) | 1.89 | 2.88 | 3.87 | 4.86 |
+|---|---|---|---|---|
+| **Janča** | **0.487** | **0.581** | **0.635** | **0.668** |
+| Barkmeier | 0.403 | 0.503 | **0.571** | **0.610** |
+| Delphos | 0.437 | 0.518 | 0.559 | 0.585 |
+
+**This corrects the raw recall comparison.** Janča 0.689 vs Barkmeier 0.426 is a 26-point gap
+measured at **2.7× different budgets** (5.63 vs 2.08). At matched budget it is **5–8 points**.
+
+**Barkmeier and Delphos swap ranking depending on budget** — Delphos ahead below ~3.5, Barkmeier
+above. At their defaults you would compare 0.426 to 0.542 and conclude Delphos wins; that
+conclusion is an artefact of where the two defaults happen to sit.
+
+**Held out properly**: parameter chosen on 10 stratified training subjects, measured on 15
+unseen. Test recall came out *above* train in most cases, so there is no sign of overfitting —
+expected, since one scalar is being fitted.
+
+**LOSO stability — and Delphos is the weak one.** Across 25 leave-one-out folds the chosen
+parameter varies by **7–8% (Janča)**, **10% (Barkmeier)**, **21–27% (Delphos)**. Delphos's
+recommended threshold is 2–3× less well determined than the others', consistent with its coarser
+grid *and* with its ~4% run-to-run nondeterminism. Treat any single recommended `Spk_thr` with
+that much slack.
+
+**Not yet transferred.** These come from *monopolar, scalp-referenced, sleep* recordings; P1/P5
+are *bipolar SEEG with stimulation*. Applying them there and checking findings 1–4 do not
+invert is the outstanding step.
+
+---
+
 ## Findings
 
 All on P1 baseline (`runs/P1_pre.npz`), 600 s, 226 bipolar channels, unless stated.

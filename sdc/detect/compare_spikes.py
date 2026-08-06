@@ -83,6 +83,7 @@ from seeg import (read_edf_header, load_edf_segment, derive_montage, apply_monta
                   load_trials, get_patient, get_trial, resolve_file, detect_stim,
                   dilate_mask, merge_close)
 from seeg import detect_spikes as detect_barkmeier
+from seeg.spikes import fill_mask_ar
 # Import the detector's constants rather than retyping them. These were previously copied as
 # literals here, which meant an upstream change would not reach this comparison -- and the
 # copies agreed only by coincidence.
@@ -133,7 +134,50 @@ PREP_DELPHOS = os.environ.get('PREP_DELPHOS', '1') == '1'
                       # already bipolar it must be told `bipolar: False`, exactly as the sim
                       # path does. Get that wrong and it pairs the pairs, silently.
                       # Set 0 to restore the old behaviour (Delphos on the raw file).
+FILL_ALL = os.environ.get('FILL_ALL', '1') == '1'
+                      # AR-fill the masked samples ONCE, in the shared preprocessed array,
+                      # before ANY detector sees it -- including before the EDF Delphos reads.
+                      #
+                      # WHY. Masking removes detections INSIDE artefact after the fact, but the
+                      # artefact still reached the detector and biased whatever it estimates
+                      # from the data: Barkmeier's per-block mean/std, Janca's per-channel
+                      # background, Delphos's TF whitening. Measured on P1: on the L/B/H/T
+                      # shafts, Delphos runs at 0.059 Hz/ch in the stim-free baseline and
+                      # 0.181 in the stim recording's OFF blocks -- 3.1x, on data with no
+                      # stimulation in it -- while the rest of the implant sits still
+                      # (0.077 -> 0.071). The artefact corrupts the threshold for the whole
+                      # window, so detections in clean periods are wrong.
+                      #
+                      # seeg.fill_mask_ar fits a 20th-order AR model per channel to the CLEAN
+                      # samples and substitutes median + spectrum-matched coloured noise. Its
+                      # own docstring gives this exact rationale for Barkmeier; it applies
+                      # verbatim to the other two.
+                      #
+                      # NOT EXCISION. Cutting the masked spans and re-joining would leave a
+                      # step discontinuity at every join, and Delphos detects sharp edges by
+                      # construction -- the synthetic template had exactly this bug, and fixing
+                      # it moved Delphos's SNR-12 precision 0.810 -> 0.997. Filling avoids
+                      # manufacturing thousands of them.
+                      #
+                      # Filled against the DILATED mask -- a DELIBERATE DEPARTURE from
+                      # seeg.detect_spikes, which fills the undilated one. Two reasons:
+                      #  * artefact does not stop at the flagged samples. A low-dynamic-range
+                      #    stretch has a step at each end and ringing either side, and the mask
+                      #    is 2 s epoch-resolution so those edges routinely fall just outside
+                      #    it. Leaving them in puts the sharpest features in the recording into
+                      #    the estimator -- exactly what this is meant to prevent, and exactly
+                      #    what Delphos fires on.
+                      #  * consistency. Detections are REJECTED inside the dilated mask and
+                      #    clean_sec (hence the 80% channel gate) is computed from it. Treating
+                      #    a region as too contaminated to accept a detection from, but clean
+                      #    enough to fit the normaliser on, is incoherent.
+                      # The error is asymmetric: filling a little too much costs some real
+                      # signal replaced by spectrum-matched noise; filling too little leaves
+                      # the artefact in every threshold.
 FILL_BAD_SAMPLES = os.environ.get('FILL_BAD', '0') == '1'
+                      # Barkmeier's OWN fill, inside seeg.detect_spikes. Stays OFF: with
+                      # FILL_ALL the array is already filled, and filling twice would refit the
+                      # AR model on a signal that is partly synthetic.
                       # seeg.detect_spikes defaults this TRUE, which AR-fills masked
                       # regions for Barkmeier ONLY -- Janca and Delphos see the real artefact.
                       # It matters even though those regions are masked afterwards, because
@@ -322,6 +366,7 @@ if not SIMULATE:
         "" if MED_KERNEL == 5 else f"_med{MED_KERNEL}",
         "" if DETECT_FS == 1000.0 else f"_{DETECT_FS:g}Hz",
         "" if PREP_DELPHOS else "_rawdelphos",
+        "" if FILL_ALL else "_nofill",
         "" if QC_NATIVE else "_qcdec",
         "_fillbad" if FILL_BAD_SAMPLES else "",
         "" if MERGE_MS == 100.0 else f"_merge{MERGE_MS:g}",
@@ -442,6 +487,14 @@ if QC_NATIVE:
     print(f"[qc] ran at {_qc_fs:g} Hz, mask folded to {dec['data'].shape[0]} samples "
           f"at {fs:g} Hz ({dmask.mean():.2%} masked after dilation)")
 
+# ---- AR-fill the masked samples, ONCE, for every detector (see FILL_ALL) --------------
+if FILL_ALL and np.any(dmask):
+    _before = float(np.mean(np.abs(dec["data"])))
+    dec["data"] = fill_mask_ar({"data": dec["data"], "info": dec["info"]},
+                               {"sampleMask": dmask})["data"]
+    print(f"[fill] AR-filled {dmask.mean():.2%} of samples (dilated mask); "
+          f"mean |x| {_before:.1f} -> {np.mean(np.abs(dec['data'])):.1f} uV")
+
 # Per-sample stim ON/OFF on the DETECTION grid, expanded from the QC epochs. Stored rather than
 # used to pre-split, because a Delphos call is ~5 min: the split definition has to be
 # changeable downstream without re-running anything.
@@ -490,7 +543,8 @@ if PREP_DELPHOS and RUN_DELPHOS and not SIMULATE:
     # Name carries everything that changes the CONTENT, so a stale file can never be picked up
     # after a config change -- and so Delphos's cache (keyed on path + size) cannot collide.
     PREP_EDF = str(_prep_dir / f"{REC_META['rec_id']}{WINDOW_TAG}"
-                   f"_med{MED_KERNEL}_{fs:g}Hz_{START_REC}-{STOP_REC}.edf")
+                   f"_med{MED_KERNEL}_{fs:g}Hz{'_fill' if FILL_ALL else '_nofill'}"
+                   f"_{START_REC}-{STOP_REC}.edf")
     if Path(PREP_EDF).is_file():
         print(f"[prep] reusing {Path(PREP_EDF).name}")
     else:
@@ -714,6 +768,7 @@ def _dump_detections(dets, path, extra=None):
                  # preprocessing toggles -- these MOVE the numbers, so a run that does not
                  # record them cannot be compared with one that does
                  "qc_native": np.int64(bool(QC_NATIVE)), "med_kernel": np.int64(MED_KERNEL),
+                 "fill_all": np.int64(bool(FILL_ALL)),
                  # WHICH FILE DELPHOS READ. Before this existed, a run with the median filter
                  # on and one with it off were indistinguishable in the npz, and they are not
                  # comparable -- Delphos saw a different signal in each.

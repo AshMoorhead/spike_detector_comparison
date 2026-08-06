@@ -63,7 +63,14 @@ class Selection:
     # rank by count is 215th. The project's own Q2 analysis says a quiet channel needs hundreds
     # of seconds for a +-20% rate, so 5% of the recording is already generous; it is set here as
     # a floor against absurdity, not as a sufficiency criterion.
-    MIN_CLEAN_FRAC = 0.05
+    # 0.20 = "drop any channel more than 80% masked". Raised from 0.05, which was only ever a
+    # floor against absurdity (O7_O8 at 3.88 s of 652 reporting 2.06 Hz). 80% is the point at
+    # which the channel is no longer being measured: with FILL_ALL its analysed signal is mostly
+    # AR-synthesised noise, and the AR model itself was fitted to whatever clean samples remain,
+    # so both the signal and the model behind it are thin. Detections inside filled regions are
+    # removed by the mask anyway -- this gate is about not REPORTING a rate for a channel that
+    # was not really observed.
+    MIN_CLEAN_FRAC = 0.20
 
     @property
     def measurable(self):

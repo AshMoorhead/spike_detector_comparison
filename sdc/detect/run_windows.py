@@ -183,7 +183,17 @@ def merge_windows(rec_id=None, delete_parts=True):
     if abs(full.shape[0] - expect) > fs:               # a second of slack for record rounding
         raise SystemExit(f"assembled {full.shape[0]} samples, expected ~{expect} "
                          f"({total_sec}s at {fs:g} Hz) -- interior arithmetic is wrong.")
-    prep = ROOT / "prep_edf" / f"{rec_id}_full_med{int(z0['med_kernel'])}_{fs:g}Hz.edf"
+    # THE FILENAME MUST CARRY EVERY SETTING THAT CHANGES THE CONTENT. Two bugs, both silent,
+    # both hit at once when FILL_ALL was introduced:
+    #   * this used to skip the write when a file of that name existed, so a re-run after a
+    #     config change read the PREVIOUS run's signal;
+    #   * Delphos's on-disk cache is keyed on {path, SIZE, cfg}, and filling does not change
+    #     the size -- so even a rewritten file would have returned the stale cached result.
+    # Delphos came back byte-identical (14079) after the fill and looked unaffected by it.
+    # Distinct names defeat both: the file is rewritten and the cache misses.
+    _v = f"_med{int(z0['med_kernel'])}_{fs:g}Hz"
+    _v += "_fill" if ("fill_all" not in z0.files or int(z0["fill_all"])) else "_nofill"
+    prep = ROOT / "prep_edf" / f"{rec_id}_full{_v}.edf"
     if not prep.is_file():
         print(f"[prep] writing {prep.name}  {full.shape} ...")
         write_edf(str(prep), full, names, fs)

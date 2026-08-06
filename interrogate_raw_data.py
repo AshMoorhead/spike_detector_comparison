@@ -31,7 +31,7 @@ NPZ = "runs/P1_stim.npz"       # any file in runs/
 CHANNELS = ["L6_L7", "L5_L6", "L1_L2", "B1_B2", "B9_B10", "H14_H15", "T11_T12", "O6_O7"]
                                # channel names, or None for the busiest DISAGREEMENT channels
 T0 = 300.0                     # seconds from the start of the recording
-DURATION = 20.0                # seconds on screen
+DURATION = 100.0                # seconds on screen
 GAIN = 1.0                     # vertical zoom; also adjustable live with up/down
 RAW = False                    # False: what the detectors saw. True: the original EDF.
 N_AUTO = 12                    # how many channels CHANNELS=None picks

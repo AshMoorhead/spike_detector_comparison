@@ -76,8 +76,15 @@ def test_rate_refuses_a_channel_with_almost_no_analysable_time():
     r = s.rate([60, 8, 6])
     assert np.isclose(r[0], 0.1)            # fully clean channel: unchanged
     assert np.isnan(r[1]), r                # 0.65% analysable -> not measurable
-    assert np.isclose(r[2], 0.1)            # 10% analysable -> still measurable
-    assert list(s.measurable) == [True, False, True]
+    assert np.isnan(r[2]), r                # 10% analysable -> also out, at the 80%-masked gate
+    assert list(s.measurable) == [True, False, False]
+
+
+def test_gate_is_at_eighty_percent_masked():
+    """A channel just inside and just outside the 80%-masked gate."""
+    s = cond.Selection("all", np.array([[0.0, 100.0]]), 100.0, {"D": np.ones(2, bool)},
+                       clean_sec=np.array([21.0, 19.0]))
+    assert list(s.measurable) == [True, False]
 
 
 def test_measurable_is_none_without_clean_sec():
@@ -198,6 +205,7 @@ if __name__ == "__main__":
     test_isi_boundary_is_half_open()
     test_isi_too_few_spikes()
     test_rate_refuses_a_channel_with_almost_no_analysable_time()
+    test_gate_is_at_eighty_percent_masked()
     test_measurable_is_none_without_clean_sec()
     test_bins_stay_inside_one_segment()
     test_bins_are_all_the_same_width()

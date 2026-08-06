@@ -213,6 +213,40 @@ from the path.
 
 ---
 
+## Why three detectors, and not the best one
+
+**Disagreement is a diagnostic channel, not a nuisance.** The usual argument for running several
+detectors is consensus — combine them into a better one — which *discards* the disagreement. On
+complex data the more useful move is to read it: where they diverge is where the data is
+misleading you.
+
+- Delphos's flat stim ON/OFF ratio (0.90 against 0.31–0.57) was the only sign that stim artefact
+  was entering one detector's band. Had all three agreed, "stimulation does nothing" would have
+  been believed — finding 9.
+- Cross-detector corroboration split the median filter's 4288 dropped Delphos detections into 85%
+  glitch and 15% real. No detector can tell which of *its own* detections were artefact-triggered.
+- The same statistic gave opposite verdicts on Janča's 2608 additions at 1 kHz (32.5% corroborated
+  against its own 69.5% baseline) and on Delphos's glitches (14.8%).
+- Barkmeier's EZ concentration exists only as a comparison — finding 10.
+
+**It works because the three gate on independent things** (statistical envelope / waveform shape /
+time-frequency sharpness) and therefore fail differently. Measured on shared components: a median
+filter costs Delphos 14.4%, Janča 2.7% and Barkmeier nothing; the artefact mask takes 23% / 4% /
+17%; `MERGE_MS=100` removes 0 from Janča (it merges internally first) but 1632 from Barkmeier.
+Almost nothing moves all three the same way, which is what makes divergence readable.
+
+**Two limits, both hit in practice:**
+
+- *It localises, it does not adjudicate.* Every case above still needed a mechanism — reading
+  `mDetectSpike_coeffs.m`, measuring the removed component at 1 ms wide, finding the 145 Hz
+  harmonics. Disagreement is the alarm, never the culprit.
+- *It is blind to shared steps that DELETE or MISLABEL signal* rather than transform it. Every bug
+  here that disagreement could not have caught was of that kind and in the shared analysis layer:
+  Delphos left unmasked in the window merge, a rate denominator dividing 8 detections by 3.88 s,
+  the windowing itself. Those needed a reference to reproduce against, not a second opinion.
+
+---
+
 ## Findings
 
 All on P1 baseline (`runs/P1_pre.npz`), 600 s, 226 bipolar channels, unless stated.

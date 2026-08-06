@@ -28,6 +28,7 @@ Three things it is careful about, each of which would otherwise manufacture an e
     relative to its neighbours" and "the recording drifted downwards" look identical in a
     pooled mean and completely different in time.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -59,8 +60,11 @@ fs = float(z["fs"])
 n_chan = len(names)
 dets = [str(s) for s in z["detectors"]]
 
-ON = cond.select(z, "on")
-OFF = cond.select(z, "off")
+TMAX = float(os.environ.get("TMAX", 0)) or None
+                       # TMAX=900 restricts to the first 900 s. Analysable time is
+                       # recomputed exactly, not scaled -- see cond.select.
+ON = cond.select(z, "on", tmax=TMAX)
+OFF = cond.select(z, "off", tmax=TMAX)
 if ON.clean_sec is None:
     raise SystemExit(f"{NPZ.name} has no clean_sec_on -- re-run compare_spikes.py so the "
                      f"rates can use analysable time rather than wall clock.")

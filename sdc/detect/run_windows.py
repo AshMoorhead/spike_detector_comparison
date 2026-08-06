@@ -206,12 +206,14 @@ def merge_windows(rec_id=None, delete_parts=True):
     clean = np.zeros(n_chan)
     on_sec = np.zeros(0, bool)
     on_all = []
+    clean_secs = []
     for w in windows:
         cl = np.load(dec_dir / f"dec_w{w['n']:03d}_clean.npy")
         on = np.load(dec_dir / f"dec_w{w['n']:03d}_on.npy")
         s0 = int(round(w["t0"])) - (w["start_rec"] - 1)
         s1 = min(int(round(w["t1"])) - (w["start_rec"] - 1), cl.shape[0])
         clean += cl[s0:s1].sum(axis=0) / fs
+        clean_secs.append(cl[s0:s1])
         on_all.append(on[s0:s1])
     on_sec = np.concatenate(on_all) if on_all else np.zeros(0, bool)
 
@@ -244,7 +246,9 @@ def merge_windows(rec_id=None, delete_parts=True):
         out[d] = idx
         print(f"  {d:<10} {sum(len(x) for x in idx)}")
     return dict(rec_id=rec_id, fs=fs, names=names, seconds=total_sec, prep=str(prep),
-                per=out, clean_sec=clean, on_sec=on_sec, n_samp=n_samp, windows=windows)
+                per=out, clean_sec=clean, on_sec=on_sec, n_samp=n_samp, windows=windows,
+                clean_per_sec=(np.concatenate(clean_secs) if clean_secs
+                               else np.zeros((0, n_chan), np.uint16)))
 
 
 def write_merged(m):
@@ -270,15 +274,30 @@ def write_merged(m):
     # windowing provenance -- a run made at a different window size is NOT comparable, because
     # Janca's background model and Barkmeier's block threshold are both computed over the span
     # they are handed.
+    # PER-SECOND analysable samples per channel, and the per-second stim flag. Without these,
+    # restricting an analysis to a sub-range (e.g. "the first 900 s, before the artefact at the
+    # end") can only SCALE the whole-recording clean time -- which assumes masking is uniform in
+    # time, and the entire reason for wanting a sub-range is that it is not.
+    dump["clean_per_sec"] = m["clean_per_sec"]
+    dump["on_per_sec"] = m["on_sec"]
     dump["window_sec"] = np.int64(m["windows"][0]["stop_rec"] - m["windows"][0]["start_rec"] + 1)
     dump["n_windows"] = np.int64(len(m["windows"]))
     on = m["on_sec"]
     dump["clean_sec_on"] = m["clean_sec"] * 0.0 if not on.any() else None   # filled below
     # ON/OFF: per-second resolution is enough -- the QC epochs are 2 s anyway.
     if on.any():
-        frac_on = on.mean()
-        dump["clean_sec_on"] = m["clean_sec"] * frac_on
-        dump["clean_sec_off"] = m["clean_sec"] * (1 - frac_on)
+        # EXACT, from the per-second counts. This used to be `clean_sec * on.mean()` -- the
+        # total analysable time split by the ON/OFF duty cycle -- which assumes each channel's
+        # masking is spread uniformly in time. It is not: stim artefact is concentrated in the
+        # ON blocks by definition, so a channel heavily masked during stim was still credited
+        # with ~30% of its whole-recording clean time as "ON clean time" (up to 231 s of
+        # fiction on P1_stim). Its ON rate was then divided by a denominator far too large,
+        # UNDERSTATING ON rates and OVERSTATING suppression -- i.e. biasing finding 8 in the
+        # direction it was reporting.
+        _cps = m["clean_per_sec"]
+        _n = min(_cps.shape[0], on.size)
+        dump["clean_sec_on"] = _cps[:_n][on[:_n]].sum(axis=0) / m["fs"]
+        dump["clean_sec_off"] = _cps[:_n][~on[:_n]].sum(axis=0) / m["fs"]
         edges = np.flatnonzero(np.diff(on.astype(np.int8))) + 1
         b = np.concatenate([np.array([0] if on[0] else [], np.int64), edges,
                             np.array([on.size] if on[-1] else [], np.int64)])

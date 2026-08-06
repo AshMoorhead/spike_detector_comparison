@@ -152,19 +152,36 @@ class Selection:
                 f"each {lens.min():.0f}-{lens.max():.0f}s")
 
 
-def select(z, label=None):
-    """Build a Selection from an open npz. `label` defaults to $COND, defaulting to 'all'."""
+def select(z, label=None, tmax=None):
+    """Build a Selection from an open npz. `label` defaults to $COND, defaulting to 'all'.
+
+    `tmax` restricts everything to [0, tmax) seconds. Analysable time is then recomputed
+    EXACTLY from `clean_per_sec` rather than scaled from the whole-recording total: scaling
+    assumes masking is uniform in time, and the usual reason for wanting a sub-range is that it
+    is not -- artefact concentrated at one end is exactly the case this exists for.
+    """
     label = (label or os.environ.get("COND", "all")).lower()
     if label not in ("all", "on", "off"):
         raise SystemExit(f"COND={label!r} -- expected all, on or off.")
     fs, T_all = float(z["fs"]), float(z["seconds"])
     detectors = [str(s) for s in z["detectors"]]
 
+    T = float(min(tmax, T_all)) if tmax else T_all
     if label == "all":
-        runs = np.array([[0.0, T_all]])
-        keep = {d: np.ones(z[f"{d}_idx"].size, bool) for d in detectors}
-        clean = (z["clean_sec_on"] + z["clean_sec_off"]) if "clean_sec_on" in z.files else None
-        return Selection(label, runs, T_all, keep, clean)
+        runs = np.array([[0.0, T]])
+        keep = {d: (z[f"{d}_idx"] / fs < T) if tmax else np.ones(z[f"{d}_idx"].size, bool)
+                for d in detectors}
+        if tmax and "clean_per_sec" in z.files:
+            clean = z["clean_per_sec"][:int(T)].sum(axis=0) / fs
+        elif "clean_sec_on" in z.files:
+            clean = z["clean_sec_on"] + z["clean_sec_off"]
+        else:
+            clean = None
+        if tmax and "clean_per_sec" not in z.files:
+            raise SystemExit("tmax needs `clean_per_sec`, which this run predates. Re-merge it "
+                             "(the Delphos call is cached) rather than scaling clean time -- "
+                             "scaling assumes masking is uniform in time and it is not.")
+        return Selection(label, runs, T, keep, clean)
 
     # A condition split needs a stim recording. Saying so beats drawing empty axes.
     sec_on = float(z["sec_on"]) if "sec_on" in z.files else 0.0
@@ -182,6 +199,11 @@ def select(z, label=None):
             f"(RECORDING={str(z['rec_id']) if 'rec_id' in z.files else '?'}) -- the Delphos "
             "call is cached, so it is fast.")
     runs = on if label == "on" else _complement(on, T_all)
+    if tmax:
+        if "clean_per_sec" not in z.files:
+            raise SystemExit("tmax needs `clean_per_sec`, which this run predates -- re-merge.")
+        runs = np.clip(runs, 0.0, float(tmax))
+        runs = runs[np.diff(runs, axis=1).ravel() > 0]
     T = float(np.diff(runs, axis=1).sum()) if runs.size else 0.0
     if runs.shape[0] == 0:
         raise SystemExit(f"COND={label} selects no time in this run.")
@@ -190,7 +212,16 @@ def select(z, label=None):
     for d in detectors:
         flag = z[f"{d}_on"].astype(bool)
         keep[d] = flag if label == "on" else ~flag
-    clean = z[f"clean_sec_{label}"] if f"clean_sec_{label}" in z.files else None
+        if tmax:
+            keep[d] = keep[d] & (z[f"{d}_idx"] / fs < float(tmax))
+    if tmax:
+        # exact: sum the per-second counts over the seconds of this condition inside [0, tmax)
+        cps = z["clean_per_sec"][:int(min(tmax, T_all))]
+        on_sec = z["on_per_sec"][:cps.shape[0]].astype(bool)
+        pick = on_sec if label == "on" else ~on_sec
+        clean = cps[pick].sum(axis=0) / fs
+    else:
+        clean = z[f"clean_sec_{label}"] if f"clean_sec_{label}" in z.files else None
     return Selection(label, runs, T, keep, clean)
 
 

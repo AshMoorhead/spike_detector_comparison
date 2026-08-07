@@ -55,9 +55,13 @@ GRIDS = {
     # Without the top of this range the two can only be compared where Janca happens to
     # sit, which is 2.7x Barkmeier's budget -- and that comparison measures the operating
     # points rather than the detectors.
-    "janca":     ("k1",      [2.6, 3.0, 3.4, 3.8, 4.2, 4.6, 5.0, 5.5, 6.0]),
-    "barkmeier": ("TAMP",    [400, 600, 800, 1000, 1200, 1500]),
-    "delphos":   ("Spk_thr", [30, 50, 80, 120]),          # coarse: see COST
+    # Extended DOWN to k1=1.2 to find the RECALL CEILING. The question a monotone curve
+    # cannot answer from its middle: does recall approach 1.0 if you accept enough detections,
+    # or does it plateau? A plateau means expert marks that the detector cannot reach at ANY
+    # threshold -- a statement about what it can see, not about where it is set.
+    "janca":     ("k1",      [1.2, 1.6, 2.0, 2.3, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6, 5.0, 5.5, 6.0]),
+    "barkmeier": ("TAMP",    [100, 200, 300, 400, 600, 800, 1000, 1200, 1500]),
+    "delphos":   ("Spk_thr", [8, 15, 30, 50, 80, 120]),    # coarse: see COST
 }
 LABEL = {"janca": "Janca", "barkmeier": "Barkmeier", "delphos": "Delphos"}
 

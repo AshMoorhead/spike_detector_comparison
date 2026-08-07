@@ -34,6 +34,7 @@ WHAT WINDOWING COSTS, stated rather than hidden
   MERGE_MS is then re-applied across the joins, because two detections either side of an
   interior boundary were merged by neither window.
 """
+import json
 import os
 import subprocess
 import sys
@@ -48,6 +49,19 @@ from sdc.common.paths import ROOT, RUNS
 from sdc.common.invariants import check_run
 
 RECORDING = os.environ.get("RECORDING", "P1_pre")
+RUN_TAG = os.environ.get("RUN_TAG", "")
+                      # Threaded through EVERY filename this driver reads or writes. It was
+                      # not, and the failure was silent in the worst way: compare_spikes
+                      # honoured the tag when writing per-window files, so a tuned run computed
+                      # tuned windows -- and then merge_windows read the UNTAGGED (default)
+                      # windows and wrote the untagged merged file. The output equalled the
+                      # default exactly, which reads as "the tuning made no difference".
+DELPHOS_CFG = dict(pin_free_ram_gb=12, Spk_thr=50, Spk_time_thr=1.25)
+_tune = json.loads(os.environ.get("DET_TUNE", "") or "{}").get("delphos", {})
+DELPHOS_CFG.update({k: v for k, v in _tune.items()})
+                      # Delphos runs HERE, not in compare_spikes, so DET_TUNE has to be applied
+                      # here too. Spk_thr was hardcoded to 50, which meant a tuned Delphos value
+                      # was accepted, printed, and then ignored.
 MEM_BUDGET = float(os.environ.get("MEM_BUDGET", 1e9))   # bytes; window_bounds' own default
 BLOCK_SEC = int(os.environ.get("BLOCK_SEC", 60))        # the pipeline's block size, not the
                                                         # 120 s the interactive script uses
@@ -153,7 +167,8 @@ def merge_windows(rec_id=None, delete_parts=True):
     rec_id = rec_id or RECORDING
     edf, hdr, total_sec, windows = plan(rec_id)
     dec_dir = ROOT / "prep_edf" / f"_{rec_id}_windows"
-    parts = [np.load(RUNS / f"{rec_id}_w{w['n']:03d}.npz", allow_pickle=False) for w in windows]
+    parts = [np.load(RUNS / f"{rec_id}{RUN_TAG}_w{w['n']:03d}.npz", allow_pickle=False)
+             for w in windows]
     z0 = parts[0]
     fs = float(z0["fs"])
     names = [str(s) for s in z0["names"]]
@@ -221,8 +236,7 @@ def merge_windows(rec_id=None, delete_parts=True):
     # ---- Delphos, ONCE, over the assembled file --------------------------------------------
     print(f"[delphos] one call over the whole {total_sec}s file")
     dl = detect_delphos(str(prep), names, fs, start_sec=0.0, duration_sec=float(total_sec),
-                        cache_dir=ROOT / ".delphos_cache", bipolar=False,
-                        pin_free_ram_gb=12, Spk_thr=50, Spk_time_thr=1.25)
+                        cache_dir=ROOT / ".delphos_cache", bipolar=False, **DELPHOS_CFG)
     # SAME artefact mask as the other two. Janca and Barkmeier were masked inside their
     # per-window runs; Delphos is run here, so it must be masked here. Skipping this once made
     # Delphos the only unmasked arm and inflated it by ~20%, which read as a Delphos result.
@@ -266,7 +280,7 @@ def write_merged(m):
         dump[f"{d}_chan"] = (np.concatenate([np.full(len(x), c, int)
                                              for c, x in enumerate(idx)])
                              if any(len(x) for x in idx) else np.zeros(0, int))
-    z0 = np.load(RUNS / f"{m['rec_id']}_w001.npz", allow_pickle=False)
+    z0 = np.load(RUNS / f"{m['rec_id']}{RUN_TAG}_w001.npz", allow_pickle=False)
     for k in ("merge_ms", "dilate_ms", "tol_ms", "detect_fs", "mask_artefacts", "janca_pt_ms",
               "qc_native", "med_kernel", "fill_bad_samples", "rec_id", "patient", "condition",
               "stim_hz", "delphos_input"):
@@ -316,7 +330,7 @@ def write_merged(m):
         dump["sec_off"] = np.float64(m["seconds"])
         for d in ("Janca", "Barkmeier", "Delphos"):
             dump[f"{d}_on"] = np.zeros(dump[f"{d}_idx"].size, bool)
-    out = RUNS / f"{m['rec_id']}.npz"
+    out = RUNS / f"{m['rec_id']}{RUN_TAG}.npz"
     check_run(dump, n_samp=m["n_samp"], fs=m["fs"])
     np.savez(out, **{k: v for k, v in dump.items() if v is not None})
     print(f"[saved] {out.name}   "
@@ -337,7 +351,7 @@ def draw_raster(rec_id=None):
     import matplotlib.pyplot as plt
     from seeg._style import RED, BLUE, MUTED, recessive
     rec_id = rec_id or RECORDING
-    z = np.load(RUNS / f"{rec_id}.npz", allow_pickle=False)
+    z = np.load(RUNS / f"{rec_id}{RUN_TAG}.npz", allow_pickle=False)
     names = [str(s) for s in z["names"]]
     fs, T = float(z["fs"]), float(z["seconds"])
     n_chan = len(names)
@@ -386,7 +400,7 @@ def draw_raster(rec_id=None):
                  f"{int(z['window_sec'])}s for Janca/Barkmeier, Delphos in one pass",
                  fontsize=11)
     fig.tight_layout()
-    out = ROOT / "figures" / "real" / rec_id / "compare_raster.png"
+    out = ROOT / "figures" / "real" / rec_id / f"compare_raster{RUN_TAG}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=130)
     plt.close(fig)

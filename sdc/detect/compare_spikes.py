@@ -344,6 +344,14 @@ SIM_POINT = os.environ.get("SIM_POINT", "op")            # run label -> npz file
 # run_sim_suite.py drives it.
 SIM_OVERRIDE = json.loads(os.environ.get("DET_OVERRIDE",
                                          os.environ.get("SIM_OVERRIDE", "")) or "{}")
+# DET_TUNE sets SEVERAL detectors at once: {"janca":{"k1":4.48}, "barkmeier":{"TAMP":890}, ...}.
+# DET_OVERRIDE moves one knob for a sweep point; this applies a whole operating point, which is
+# what the tuned-vs-default comparison needs.
+DET_TUNE = json.loads(os.environ.get("DET_TUNE", "") or "{}")
+RUN_TAG = os.environ.get("RUN_TAG", "")   # appended to the npz name. Without it a tuned run
+                                          # overwrites the default run it is meant to be
+                                          # compared against -- which has happened three times
+                                          # in this project, hence the explicit knob.
 SIM_CLEAN_MASK = True  # zero the QC mask (the sim contains no artefacts -- see below)
 SIM_RUNS = _ROOT / "sim_runs"
 # The env vars just DEFAULT to the constants above, so nothing changes when they are unset.
@@ -415,7 +423,7 @@ if not SIMULATE and not BIDS_SUBJECT:
     # canonical MED_KERNEL=5 result minutes after it was produced, and only a hand copy saved
     # it. Same failure as the TAMP=400 incident noted above -- a differently-configured run
     # sitting in the file where the canonical one is expected.
-    _variant = "".join([
+    _variant = RUN_TAG + "".join([
         "" if MED_KERNEL == 5 else f"_med{MED_KERNEL}",
         "" if DETECT_FS == 1000.0 else f"_{DETECT_FS:g}Hz",
         "" if PREP_DELPHOS else "_rawdelphos",
@@ -886,6 +894,18 @@ def _sim_extra(point):
 # --- baseline run: every detector at its defaults ---
 # A detector that cannot run is dropped from `dets` (and from the figure) rather than faked
 # with zeros -- an empty panel would read as "found nothing", which is a different claim.
+if DET_TUNE:
+    # A whole operating point, applied before the runners so the sweep machinery and the
+    # detectors agree. Printed in full: a run at non-default settings that does not say so in
+    # its own log is the thing this project keeps being bitten by.
+    _t = {"janca": JANCA, "barkmeier": BARK, "delphos": DELPHOS}
+    for _d, _kv in DET_TUNE.items():
+        if _d.lower() not in _t:
+            raise SystemExit(f"DET_TUNE detector {_d!r} unknown; use one of {sorted(_t)}")
+        for _p, _v in _kv.items():
+            _t[_d.lower()][_p] = _v
+        print(f"[tune] {_d}: " + ", ".join(f"{k}={v:g}" for k, v in _kv.items()))
+
 if SIM_OVERRIDE:
     # One knob moved off its default for this run, so the sweep can be scored against ground
     # truth. Applied to the module-level dict so the sweep machinery and the runners agree.

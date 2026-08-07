@@ -45,6 +45,7 @@ from seeg import read_edf_header, load_trials, get_patient, get_trial, resolve_f
 from seeg.edf import window_bounds
 
 from sdc.common.paths import ROOT, RUNS
+from sdc.common.invariants import check_run
 
 RECORDING = os.environ.get("RECORDING", "P1_pre")
 MEM_BUDGET = float(os.environ.get("MEM_BUDGET", 1e9))   # bytes; window_bounds' own default
@@ -316,6 +317,7 @@ def write_merged(m):
         for d in ("Janca", "Barkmeier", "Delphos"):
             dump[f"{d}_on"] = np.zeros(dump[f"{d}_idx"].size, bool)
     out = RUNS / f"{m['rec_id']}.npz"
+    check_run(dump, n_samp=m["n_samp"], fs=m["fs"])
     np.savez(out, **{k: v for k, v in dump.items() if v is not None})
     print(f"[saved] {out.name}   "
           + "  ".join(f"{d} {dump[f'{d}_idx'].size}" for d in ("Janca", "Barkmeier", "Delphos")))

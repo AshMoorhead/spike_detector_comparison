@@ -93,6 +93,7 @@ from sdc.detect.janca_detect_spikes import detect_spikes as detect_janca
 from sdc.detect.delphos_detect_spikes import detect_spikes as detect_delphos
 from sdc.common.spike_match import match as spike_match_fn
 from sdc.common.paths import ROOT as _ROOT
+from sdc.common.invariants import check_run
 
 # ---- which recording ----------------------------------------------------------------
 # Recordings are named by (patient, trial, condition) and RESOLVED through the pipeline's own
@@ -854,6 +855,9 @@ def _dump_detections(dets, path, extra=None):
         idx = dump[f"{name}_idx"]
         dump[f"{name}_on"] = ON_MASK[idx] if idx.size else np.zeros(0, bool)
     dump.update(extra or {})
+    # Structural checks BEFORE the write: a wrong number here becomes a result, and the
+    # cross-detector disagreement this project leans on cannot see errors in shared code.
+    check_run(dump, n_samp=dmask.shape[0], fs=fs)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, **dump)
     print(f"[saved] {Path(path).name}")

@@ -86,6 +86,43 @@ CEILING = {
     "barkmeier": ("std_coeff", [1.5, 2.0, 2.5, 3.0]),   # default 4.0
 }
 
+# ----------------------------------------------------------------------
+# ONE KNOB PER DETECTOR IS A LIMITATION, NOT A CONCLUSION -- how to lift it
+# ----------------------------------------------------------------------
+# Everything above moves a single sensitivity dial and holds the shape parameters fixed. That
+# was the right first pass (a knob that does nothing on a flat curve tells you nothing), but it
+# cannot find an operating point that trades ONE criterion against another -- Barkmeier accepting
+# lower-amplitude events if they are longer, say. Two knobs would.
+#
+# WHAT ALREADY WORKS
+#   * compare_spikes reads DET_TUNE = {"barkmeier": {"TAMP": 890, "LD": 6, "RD": 6}, ...}, so the
+#     TRANSFER run onto P1/P5 needs no change at all -- it already applies whole operating points.
+#   * DET_OVERRIDE takes "LD+RD" to set a matched pair from one value (compare_spikes:919). The
+#     left/right half-wave criteria are a pair, and moving one alone measures asymmetry rather
+#     than strictness, so a 2-D sweep should use LD+RD as ONE axis, not two.
+#
+# WHAT WOULD HAVE TO CHANGE
+#   1. GRIDS entries become a list of axes, e.g.
+#          "barkmeier": [("TAMP", [...]), ("LD+RD", [4, 6, 8, 10, 12])]
+#      and run_point/score_point take a dict of {param: value} instead of one pair. The npz
+#      filename must carry EVERY axis -- with one axis in the name, two grids that differ only
+#      on the second silently collide and the second run is skipped as already-done.
+#   2. `value_for_budget` breaks. With one monotone axis, "the parameter that hits 3.5
+#      det/chan-min" is a single interpolation. With two it is a CURVE of combinations that all
+#      hit 3.5, and the operating point is the one on it with the best recall -- i.e. take the
+#      upper envelope of the (rate, recall) cloud and pick along it. That is a real change to
+#      pick_operating_point, not a loop wrapped around the existing call.
+#   3. LOSO matters much more. Fitting 2 numbers instead of 1 on 25 subjects is where a chosen
+#      operating point starts memorising the cohort; the fold-to-fold spread already reported in
+#      report_labelled (b) is the diagnostic and would need watching per axis.
+#
+# COST is the reason this has not been run. It is MULTIPLICATIVE, and Delphos is 1-2 min per
+# subject per point: Barkmeier 12 x 5 x 25 = 1500 runs is an overnight job and tolerable, but a
+# 2-D Delphos grid is ~50 hours. Sweep the cheap two properly first and keep Delphos 1-D, or
+# coarsen the second axis to 3 values.
+#
+#   .venv\\Scripts\\python.exe -m sdc.scoring.sweep_labelled barkmeier janca   # after (1)+(2)
+
 
 def run_point(det, param, value, subs):
     """One grid point across every subject. Skips work already on disk."""

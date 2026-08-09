@@ -181,12 +181,24 @@ def main():
         b, r = budget_recall(values, tp, nt, nd, cm, np.arange(len(subs)))
         o = np.argsort(b)
         ax.plot(b[o], r[o], "-o", ms=5, lw=1.8, color=COLORS[LABEL[d]], label=LABEL[d])
+    # THIN lines, not thick bands. These are single target rates, and drawn at lw=5 they read as
+    # confidence intervals -- which is exactly how the first reader took them. Nothing here has a
+    # width: each is one rate you read UP from, and where a curve crosses it is that detector's
+    # recall at equal output.
     for t in TARGETS:
-        ax.axvline(t, color=GRID, lw=5, alpha=.5, zorder=0)
-    # clipped to the region the targets live in -- Janca's grid runs out to 142 det/chan-min and
-    # on a linear axis that tail squeezes all three targets into the first 5% of the panel. The
-    # full curve to the ceiling is labelled_report (a).
+        ax.axvline(t, color="0.55", ls="--", lw=1.0, zorder=0)
+        ax.annotate(f"{t:g}", (t, 0.012), xycoords=("data", "axes fraction"),
+                    fontsize=8, color="0.4", ha="center", va="bottom")
+    ax.annotate("target rates", (TARGETS[-1] + 0.35, 0.012), xycoords=("data", "axes fraction"),
+                fontsize=8, color="0.4", ha="left", va="bottom")
+    # CLIPPED, deliberately: Janca's grid runs out to 142 det/chan-min and on a linear axis that
+    # tail squeezes all three targets into the first 5% of the panel. This panel is about where
+    # the targets sit; the ceiling question is labelled_report (a), which plots every point on a
+    # log axis. Said on the panel rather than only here -- a clipped axis that does not announce
+    # itself is indistinguishable from a curve that ends.
     ax.set_xlim(0, 15)
+    ax.text(.99, .10, "axis clipped to the target region -- full curves in labelled_report (a)",
+            transform=ax.transAxes, fontsize=7, color=MUTED, ha="right")
     ax.set_xlabel("detection rate (detections per channel-minute)")
     ax.set_ylabel("recall vs expert marks")
     ax.set_title("(a) all 25 subjects -- compare VERTICALLY, at equal detection rate",

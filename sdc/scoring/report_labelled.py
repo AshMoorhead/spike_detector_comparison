@@ -104,27 +104,31 @@ def main():
         values, tp, nt, nd, cm = M[d]
         b, r = budget_recall(values, tp, nt, nd, cm, allrows)
         o = np.argsort(b)
-        flat = plateau(values, b, r)[2]
+        knee, top, flat = plateau(values, b, r)
+        # Every complete grid point is drawn -- the curve is the evidence, so truncating it or
+        # decorating the end with an arrow both amount to editorialising over the data.
         ax.plot(b[o], r[o], "-o", ms=4.5, lw=1.9, color=COLORS[LABEL[d]],
-                label=LABEL[d] + ("" if flat else "  (grid ends, still rising)"))
-        knee, top, _ = plateau(values, b, r)
+                label=LABEL[d] + ("" if flat else "  (still rising at the end of its sweep)"))
+        # The RING is the only mark, and it appears only where the curve genuinely flattened.
+        # No ring means no ceiling was measured -- not a ceiling drawn at the last grid point.
         if flat:
             ax.plot([knee], [np.interp(knee, b[o], r[o])], "o", ms=13, mfc="none",
                     mec=COLORS[LABEL[d]], mew=1.8)
-        else:
-            # an arrow, not a ring: the curve was still climbing when the sweep stopped, so
-            # there is no ceiling to report and 1-top is NOT "unreachable".
-            ax.annotate("", xy=(b[o][-1] * 2.1, r[o][-1]), xytext=(b[o][-1], r[o][-1]),
-                        arrowprops=dict(arrowstyle="->", color=COLORS[LABEL[d]], lw=1.6))
         print(f"{LABEL[d]:<11}{top:>12.3f}{knee:>11.1f}"
               f"{f'{1 - top:.0%}' if flat else 'n/a':>13}{'yes' if flat else 'NO':>19}")
     ax.axvline(MATCH_RATE, color="0.4", ls="--", lw=1.1)
     ax.set_xscale("log")
     ax.set_xlabel("detection rate (detections per channel-minute, log)")
     ax.set_ylabel("recall vs expert marks")
-    ax.set_title("(a) recall vs output. RING = a real knee: beyond it extra detections buy no\n"
-                 "recall, so what is missed is unreachable. ARROW = still rising when the grid "
-                 "ended", fontsize=9, loc="left")
+    ax.set_title("(a) recall vs output, every grid point swept. RING = a real knee: beyond it\n"
+                 "extra detections buy no recall, so what is missed is unreachable at any "
+                 "threshold", fontsize=9, loc="left")
+    # Which knob each curve is swept on. It belongs on the panel because a knee is a statement
+    # about THAT KNOB, not about the detector: Barkmeier's TAMP saturates (mDetectSpike:148 only
+    # filters a pool that STDCoeff at :116 has already fixed), so its flat top is where TAMP
+    # stops binding rather than where Barkmeier stops seeing. See CEILING in sweep_labelled.
+    ax.text(.01, .015, "swept: " + ",  ".join(f"{LABEL[d]} {GRIDS[d][0]}" for d in dets),
+            transform=ax.transAxes, fontsize=7, color=MUTED)
     ax.legend(frameon=False, fontsize=9)
     recessive(ax)
 

@@ -59,16 +59,32 @@ GRIDS = {
     # cannot answer from its middle: does recall approach 1.0 if you accept enough detections,
     # or does it plateau? A plateau means expert marks that the detector cannot reach at ANY
     # threshold -- a statement about what it can see, not about where it is set.
-    # Barkmeier and Delphos were extended DOWN for the same reason, and later: at the original
-    # floors (TAMP=100, Spk_thr=8) both curves were still climbing, so their top recall was the
-    # end of the grid rather than a ceiling. Only Janca's plateau was ever real. report_labelled
-    # now refuses to call an unplateaued curve a ceiling, so these floors are what make the
-    # comparison in panel (a) an equal one.
+    # Delphos was extended DOWN for the same reason, and later: at the original floor
+    # (Spk_thr=8) its curve was still climbing, so its top recall was the end of the grid rather
+    # than a ceiling. report_labelled now refuses to call an unplateaued curve a ceiling.
     "janca":     ("k1",      [1.2, 1.6, 2.0, 2.3, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6, 5.0, 5.5, 6.0]),
+    # 25/50/75 are a NEGATIVE CONTROL, not an attempt to go higher -- see CEILING below.
     "barkmeier": ("TAMP",    [25, 50, 75, 100, 200, 300, 400, 600, 800, 1000, 1200, 1500]),
     "delphos":   ("Spk_thr", [2, 4, 8, 15, 30, 50, 80, 120]),    # coarse: see COST
 }
 LABEL = {"janca": "Janca", "barkmeier": "Barkmeier", "delphos": "Delphos"}
+
+# TAMP CANNOT TAKE BARKMEIER ANY HIGHER, and the grid above shows why rather than asserting it.
+# mDetectSpike_coeffs.m:116 picks the CANDIDATE peaks with `-mean|x| - STDCoeff*std|x|`; TAMP
+# (:148) only filters that pool. So once TAMP stops binding, lowering it cannot add a single
+# detection -- and it stops binding around 200: TAMP 300 -> 200 -> 100 moves the rate 9.23 ->
+# 9.87 -> 10.01 and recall 0.6735 -> 0.6751 -> 0.6762. A 3x change in the knob buys 0.8% more
+# output. 25/50/75 stay in the grid to make that flat visible, and that is the only reason they
+# are there -- an asserted saturation and a plotted one are not the same evidence.
+#
+# STDCoeff is the knob that sets the pool, and it is the direct analogue of Janca's k1 -- also a
+# std multiplier, which is how Janca reaches 142 det/chan-min at k1=1.2. Swept SEPARATELY rather
+# than merged into GRIDS["barkmeier"]: the operating points (TAMP=890 at 3.5 det/chan-min) and
+# every LOSO/paired number are defined on the TAMP axis, and silently changing which knob that
+# axis refers to would redefine them. This is a ceiling experiment and nothing else reads it.
+CEILING = {
+    "barkmeier": ("std_coeff", [1.5, 2.0, 2.5, 3.0]),   # default 4.0
+}
 
 
 def run_point(det, param, value, subs):
@@ -119,8 +135,10 @@ def score_point(det, param, value, subs):
             "per_sub": np.array(per_sub)}
 
 
-def sweep(det, subs):
-    param, values = GRIDS[det]
+def sweep(det, subs, grid=None, tag=""):
+    """`grid` overrides GRIDS[det] -- that is how the CEILING axis is driven without redefining
+    the axis the operating points are measured on. `tag` keeps its curve in its own file."""
+    param, values = grid or GRIDS[det]
     print(f"\n=== {LABEL[det]}: {param} over {values} on {len(subs)} subjects ===")
     rows = []
     for v in values:
@@ -131,17 +149,26 @@ def sweep(det, subs):
             print(f"  {param}={v:<6g} recall {r['recall']:.3f}   "
                   f"budget {r['budget']:6.2f} det/chan-min   "
                   f"precision {r['precision']:.3f} (lower bound)")
-    np.save(SWEEPS / f"curve_{det}.npy", np.array(
+    np.save(SWEEPS / f"curve_{det}{tag}.npy", np.array(
         [(r["value"], r["recall"], r["budget"], r["precision"]) for r in rows]))
     return rows
 
 
 if __name__ == "__main__":
-    dets = [a.lower() for a in sys.argv[1:]] or ["janca", "barkmeier"]
+    # "<det>:ceiling" runs that detector's CEILING axis instead of its operating-point axis.
+    args = [a.lower() for a in sys.argv[1:]] or ["janca", "barkmeier"]
     subs = subjects(BIDS_ROOT)
     SWEEPS.mkdir(parents=True, exist_ok=True)
-    for d in dets:
+    for a in args:
+        d, _, mode = a.partition(":")
         if d not in GRIDS:
             raise SystemExit(f"unknown detector {d!r}; use one of {sorted(GRIDS)}")
-        sweep(d, subs)
+        if mode == "ceiling":
+            if d not in CEILING:
+                raise SystemExit(f"no ceiling axis for {d!r}; have {sorted(CEILING)}")
+            sweep(d, subs, grid=CEILING[d], tag="_ceiling")
+        elif mode:
+            raise SystemExit(f"unknown mode {mode!r}; use '<det>' or '<det>:ceiling'")
+        else:
+            sweep(d, subs)
     print(f"\ncurves in {SWEEPS}. Score with the 10/15 split + LOSO once all three exist.")

@@ -15,6 +15,20 @@ INPUTS
   the BIDS derivatives  read through sdc.scoring.bids_events (see there for why the truth is
                         the interpretation file and not events.tsv).
 
+THIS PAGE IS AT EACH DETECTOR'S DEFAULTS, NOT AT A MATCHED DETECTION RATE
+  runs/bids_<sub>.npz is a plain BIDS-mode run, so every detector sits wherever its published
+  defaults put it -- and those are nowhere near each other:
+
+      Janca      5.49 det/chan-min   recall 0.689
+      Delphos    3.22                       0.542
+      Barkmeier  2.08                       0.426
+
+  Janca emits 2.6x what Barkmeier does. So the 26-point recall gap on this page is mostly the
+  OPERATING POINT, not the detector: hold the output rate equal at 3.5 det/chan-min and it
+  falls to 5-8 points (labelled_report (c)/(d)). Quote this page for "what you get out of the
+  box", and labelled_report for "which detector is better". They are different questions and
+  the numbers are not interchangeable.
+
 WHAT IS AND IS NOT COMPARABLE HERE
   * Recall is the number to trust. The expert marked what they marked; if a detector missed it,
     it missed it.
@@ -175,8 +189,13 @@ def figure(scored, pooled):
     for a in axes:
         a.grid(axis="y", alpha=.3)
         recessive(a)
-    fig.suptitle(f"Scored against {sum(s['n_events'] for s in scored)} expert-marked IEDs, "
-                 f"{len(scored)} subjects, unmontaged, no preprocessing", fontsize=11)
+    # "AT DEFAULTS" goes in the title, not a footnote. Without it the recall bars read as a
+    # detector comparison, and they are not: Janca is emitting 2.6x what Barkmeier is. See the
+    # module docstring for the rates.
+    fig.suptitle(f"AT EACH DETECTOR'S DEFAULTS (not a matched detection rate) -- scored against "
+                 f"{sum(s['n_events'] for s in scored)} expert-marked IEDs,\n"
+                 f"{len(scored)} subjects, unmontaged, no preprocessing.   "
+                 f"For the matched-rate comparison see labelled_report (c)/(d)", fontsize=10)
     fig.tight_layout()
     out = figdir("labelled") / "score_labelled.png"
     fig.savefig(out, dpi=130)

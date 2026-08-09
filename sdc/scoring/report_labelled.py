@@ -9,11 +9,13 @@ The labelled-benchmark result: four panels, each answering a question the others
       plateau is the point: where the curve flattens, extra detections buy no extra recall, so
       whatever is still missed is unreachable at ANY threshold -- a statement about what the
       detector can SEE rather than where it is set. A curve that was still climbing when its
-      sweep ended gets an ARROW instead of a knee ring, and no ceiling is reported for it: the
-      first version of this panel ringed the last grid point of all three and read out
-      "32% / 29% unreachable" for Barkmeier and Delphos, which was a fact about the grid.
+      sweep ended gets NO knee ring and no ceiling is reported for it: the first version of this
+      panel ringed the last grid point of all three and read out "32% / 29% unreachable" for
+      Barkmeier and Delphos, which was a fact about the grid. Shaded = 95% CI on the pooled
+      curve, bootstrapped over SUBJECTS -- see boot_band for why the resampling unit matters.
   (b) LOSO parameter stability -- IQR and far-fold count, not max-min span.
-  (c) per-subject recall, all three at the SAME detection rate.
+  (c) per-subject recall, all three at the SAME detection rate, in SUBJECT order. Sorting by
+      difficulty made it read as a smooth curve, and that shape was the sort, not the data.
   (d) PAIRED per-subject differences at that rate, one sub-row per pair. Each bar is COLOURED
       BY THE WINNER, so the direction never has to be decoded from an "A - B" label. The pooled
       gap is a mean; this shows how OFTEN each detector wins and by how much, which is the
@@ -49,6 +51,30 @@ VIOLET = "#4a3aa7"
 COLORS = {"Janca": RED, "Barkmeier": BLUE, "Delphos": VIOLET}
 MATCH_RATE = 3.5      # det/chan-min: mid-range, and where all three curves overlap
 PLATEAU_TOL = 0.005   # recall gain per DOUBLING of rate below which the curve counts as flat
+
+
+N_BOOT = 2000
+BOOT_SEED = 0
+
+
+def boot_band(tp, nt, rows, q=(2.5, 97.5)):
+    """95% CI on the POOLED recall at each grid point, bootstrapped over SUBJECTS.
+
+    Resampling subjects, not events: the 3718 marks are not independent draws -- they come in
+    25 clusters that differ enormously (panel (c) spans 0.05 to 0.9 recall), so an event-level
+    interval would be far too narrow and would treat between-subject variation as precision.
+
+    NOT the same thing as the IQR across subjects, which is ~0.3 wide and is what panel (c)
+    shows. That is the SPREAD of the population; this is the uncertainty in the pooled estimate,
+    and it is the one that answers the question panel (a) invites -- compare vertically, and is
+    the gap bigger than sampling noise over 25 subjects?"""
+    rng = np.random.default_rng(BOOT_SEED)
+    draws = rng.integers(0, len(rows), size=(N_BOOT, len(rows)))
+    out = np.empty((N_BOOT, tp.shape[1]))
+    for j, dr in enumerate(draws):
+        idx = rows[dr]
+        out[j] = tp[idx].sum(axis=0) / np.maximum(nt[idx].sum(axis=0), 1)
+    return np.percentile(out, q[0], axis=0), np.percentile(out, q[1], axis=0)
 
 
 def plateau(values, b, r):
@@ -99,11 +125,13 @@ def main():
     ax = fig.add_subplot(gs[0, 0])
     print("\nrecall CEILING -- where extra detections stop buying recall")
     print(f"{'detector':<11}{'top recall':>12}{'knee rate':>11}{'unreachable':>13}"
-          f"{'  plateau reached?':>19}")
+          f"{'  plateau reached?':>19}{'  95% CI at 3.5':>17}")
     for d in dets:
         values, tp, nt, nd, cm = M[d]
         b, r = budget_recall(values, tp, nt, nd, cm, allrows)
         o = np.argsort(b)
+        lo, hi = boot_band(tp, nt, allrows)
+        ax.fill_between(b[o], lo[o], hi[o], color=COLORS[LABEL[d]], alpha=.16, lw=0, zorder=1)
         knee, top, flat = plateau(values, b, r)
         # Every complete grid point is drawn -- the curve is the evidence, so truncating it or
         # decorating the end with an arrow both amount to editorialising over the data.
@@ -114,8 +142,10 @@ def main():
         if flat:
             ax.plot([knee], [np.interp(knee, b[o], r[o])], "o", ms=13, mfc="none",
                     mec=COLORS[LABEL[d]], mew=1.8)
+        ci = f"{np.interp(MATCH_RATE, b[o], lo[o]):.3f}-{np.interp(MATCH_RATE, b[o], hi[o]):.3f}"
         print(f"{LABEL[d]:<11}{top:>12.3f}{knee:>11.1f}"
-              f"{f'{1 - top:.0%}' if flat else 'n/a':>13}{'yes' if flat else 'NO':>19}")
+              f"{f'{1 - top:.0%}' if flat else 'n/a':>13}{'yes' if flat else 'NO':>19}"
+              f"{ci:>17}")
     ax.axvline(MATCH_RATE, color="0.4", ls="--", lw=1.1)
     ax.set_xscale("log")
     ax.set_xlabel("detection rate (detections per channel-minute, log)")
@@ -129,7 +159,16 @@ def main():
     # stops binding rather than where Barkmeier stops seeing. See CEILING in sweep_labelled.
     ax.text(.01, .015, "swept: " + ",  ".join(f"{LABEL[d]} {GRIDS[d][0]}" for d in dets),
             transform=ax.transAxes, fontsize=7, color=MUTED)
-    ax.legend(frameon=False, fontsize=9)
+    # THE OVERLAPPING BANDS ARE NOT "NO DIFFERENCE". They are marginal intervals: each is the
+    # uncertainty in one detector's pooled recall when the 25 subjects are resampled, and
+    # between-subject difficulty (0.05 to 0.9) dominates them. Panel (d) compares the SAME
+    # subject to itself, which cancels that difficulty -- which is why Janca beats Delphos on
+    # 22 of 25 subjects while these two bands sit on top of each other. Overlapping marginal
+    # CIs and a consistent paired lead are not in conflict; reading (a) alone is the error.
+    ax.text(.01, .075, "bands = 95% CI on the pooled curve, bootstrapped over subjects.\n"
+                       "They overlap because subjects differ; see (d) for the paired test",
+            transform=ax.transAxes, fontsize=7, color=MUTED)
+    ax.legend(frameon=False, fontsize=9, loc="upper left")
     recessive(ax)
 
     # ---- (b) LOSO parameter stability -----------------------------------------------------
@@ -179,9 +218,12 @@ def main():
         v = value_for_budget(values, b, MATCH_RATE)
         rec_at[LABEL[d]] = (per_subject_at(values, tp, nt, nd, cm, v)[0]
                             if np.isfinite(v) else np.full(len(subs), np.nan))
-    difficulty = np.nanmean(np.array([rec_at[LABEL[d]] for d in dets]), axis=0)
-    order = np.argsort(difficulty)          # hardest first; (c) and (d) share this ordering,
-                                            # so a subject sits at the same x in both
+    # SUBJECT ORDER, not difficulty order. Sorting by mean recall makes the panel look like a
+    # smooth curve, and that shape is an artefact of the sort -- there is no underlying ordinal
+    # variable being plotted against. Subject number is at least a fixed, detector-independent
+    # axis, so the same x is the same subject in (c) and (d) and across every version of the
+    # figure. `subjects()` already returns them sorted, so this is just the identity.
+    order = np.arange(len(subs))
 
     # ---- (c) per-subject recall -----------------------------------------------------------
     ax = fig.add_subplot(gs[1, 0])
@@ -191,7 +233,7 @@ def main():
     ax.set_xticks(np.arange(len(subs)))
     ax.set_xticklabels([subs[i].replace("sub-", "") for i in order], fontsize=6.5)
     ax.set_ylim(0, 1.02)
-    ax.set_xlabel("subject, hardest first")
+    ax.set_xlabel("subject")
     ax.set_ylabel("recall vs expert marks")
     ax.set_title("(c) per subject, all three at the SAME detection rate "
                  "({:g} det/chan-min).\nThe spread is BETWEEN-SUBJECT variation in the data, "
@@ -228,7 +270,7 @@ def main():
                           "margin,\ncolour = winner. A pooled mean cannot say whether a lead "
                           "is consistent", fontsize=9, loc="left")
         if i == len(pairs) - 1:
-            axp.set_xlabel("subject, hardest first (same order as (c))", fontsize=8)
+            axp.set_xlabel("subject (same order as (c))", fontsize=8)
         q1, q3 = np.nanpercentile(diff, [25, 75])
         print("{:<24}{:>12}{:>+9.3f}{:>20}".format(
             f"{pa[:4]} vs {pb[:4]}", f"{w}/{len(subs)}", float(np.nanmedian(diff)),

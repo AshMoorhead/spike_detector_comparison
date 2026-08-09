@@ -43,21 +43,30 @@ VIOLET = "#4a3aa7"
 COLORS = {"Janca": RED, "Barkmeier": BLUE, "Delphos": VIOLET}
 N_TRAIN = 10
 SEED = 0
-TARGETS = [2.5, 3.5, 4.5]      # detection budgets to report, det per channel-minute
+TARGETS = [2.5, 3.5, 4.5]      # detection rates to report, det per channel-minute
+MATCH_TARGET = 3.5             # the one panel (b) fixes a parameter at; same as report_labelled
 
 
 def matrix(det, subs):
     """(subject x parameter) -> tp, n_true, n_det, chan_min. Everything else is an aggregation
-    of this, which is why the split and LOSO cost nothing extra."""
+    of this, which is why the split and LOSO cost nothing extra.
+
+    INCOMPLETE GRID POINTS ARE DROPPED, not zero-filled. A value scored on 2 of 25 subjects
+    would otherwise land on the pooled curve as a real point -- with its numerator from two
+    subjects and its denominator from twenty-five, so an arbitrarily low rate at an arbitrary
+    recall. Reading a sweep while it is still running is the obvious way to hit this, and it
+    produced a Barkmeier point at 0.5 det/chan-min and recall 0.86 that looked like a result."""
     param, values = GRIDS[det]
     tp = np.zeros((len(subs), len(values)))
     nt = np.zeros_like(tp); nd = np.zeros_like(tp); cm = np.zeros(len(subs))
+    have = np.zeros(tp.shape, bool)
     for i, sub in enumerate(subs):
         d = load_subject(BIDS_ROOT, sub)
         for k, v in enumerate(values):
             f = SWEEPS / f"bids_{sub}_{det}_{param}{v:g}.npz"
             if not f.is_file():
                 continue
+            have[i, k] = True
             z = np.load(f, allow_pickle=False)
             names = [str(s) for s in z["names"]]
             fs, secs = float(z["fs"]), float(z["seconds"])
@@ -67,7 +76,14 @@ def matrix(det, subs):
             sc = event_scores(truth, [np.zeros(t.size) for t in truth], got, secs, tol_s=TOL_S)
             tp[i, k], nt[i, k], nd[i, k] = sc["tp"], sc["n_true"], sc["n_det"]
             cm[i] = len(names) * secs / 60.0
-    return np.array(values, float), tp, nt, nd, cm
+    keep = have.all(axis=0)
+    if not keep.all():
+        miss = [f"{param}={v:g} ({have[:, k].sum()}/{len(subs)})"
+                for k, v in enumerate(values) if not keep[k]]
+        print(f"  [{LABEL[det]}] dropping {len(miss)} incomplete grid point(s): "
+              f"{', '.join(miss)}")
+    v = np.array(values, float)[keep]
+    return v, tp[:, keep], nt[:, keep], nd[:, keep], cm
 
 
 def budget_recall(values, tp, nt, nd, cm, rows):
@@ -84,6 +100,19 @@ def value_for_budget(values, b, target):
     if not (b[o].min() <= target <= b[o].max()):
         return np.nan
     return float(np.interp(target, b[o], values[o]))
+
+
+def per_subject_at(values, tp, nt, nd, cm, v):
+    """Per-subject recall and ACHIEVED detection rate at one fixed parameter `v`.
+
+    Lives here rather than in report_labelled because it is the per-subject counterpart of
+    `budget_recall`, which pools -- and pooling is exactly what hides the spread in panel (b)."""
+    o = np.argsort(values)
+    rec, rate = [], []
+    for i in range(tp.shape[0]):
+        rec.append(np.interp(v, values[o], (tp[i] / np.maximum(nt[i], 1))[o]))
+        rate.append(np.interp(v, values[o], (nd[i] / max(cm[i], 1e-9))[o]))
+    return np.array(rec), np.array(rate)
 
 
 def stratified_split(subs, n_train, seed=SEED):
@@ -154,33 +183,54 @@ def main():
         ax.plot(b[o], r[o], "-o", ms=5, lw=1.8, color=COLORS[LABEL[d]], label=LABEL[d])
     for t in TARGETS:
         ax.axvline(t, color=GRID, lw=5, alpha=.5, zorder=0)
-    ax.set_xlabel("detection budget (detections per channel-minute)")
+    # clipped to the region the targets live in -- Janca's grid runs out to 142 det/chan-min and
+    # on a linear axis that tail squeezes all three targets into the first 5% of the panel. The
+    # full curve to the ceiling is labelled_report (a).
+    ax.set_xlim(0, 15)
+    ax.set_xlabel("detection rate (detections per channel-minute)")
     ax.set_ylabel("recall vs expert marks")
-    ax.set_title("(a) all 25 subjects -- compare VERTICALLY, at equal budget",
+    ax.set_title("(a) all 25 subjects -- compare VERTICALLY, at equal detection rate",
                  fontsize=9, loc="left")
     ax.legend(frameon=False, fontsize=9)
     recessive(ax)
 
+    # ---- (b) ONE fixed parameter -> what rate does each subject actually give? --------------
+    # This is the cost of a single published threshold. Panel (a) is pooled, so it shows the
+    # target being hit exactly by construction; the target is hit on the COHORT and on almost
+    # no individual subject. A held-out-recall bar chart used to sit here and only re-read (a).
     ax = axes[1]
-    w = 0.26
+    target = MATCH_TARGET
+    print(f"\n--- one fixed parameter at rate {target:g}: per-subject ACHIEVED rate ---")
+    print(f"{'detector':<11}{'param':>9}{'median':>9}{'p10-p90':>16}{'span':>8}")
+    floor = np.inf
     for j, d in enumerate(dets):
         values, tp, nt, nd, cm = M[d]
-        b_tr, r_tr = budget_recall(values, tp, nt, nd, cm, tr)
-        b_te, r_te = budget_recall(values, tp, nt, nd, cm, te)
-        o = np.argsort(values)
-        xs, ys = [], []
-        for i, t in enumerate(TARGETS):
-            v = value_for_budget(values, b_tr, t)
-            if np.isfinite(v):
-                xs.append(i + (j - 1) * w)
-                ys.append(np.interp(v, values[o], r_te[o]))
-        ax.bar(xs, ys, w * 0.9, color=COLORS[LABEL[d]], alpha=.85, label=LABEL[d])
-    ax.set_xticks(range(len(TARGETS)))
-    ax.set_xticklabels([f"budget {t:g}" for t in TARGETS])
-    ax.set_ylabel("recall on the 15 HELD-OUT subjects")
-    ax.set_title("(b) parameter chosen on 10 train subjects, measured on 15 unseen",
+        b, _ = budget_recall(values, tp, nt, nd, cm, np.arange(len(subs)))
+        v = value_for_budget(values, b, target)
+        if not np.isfinite(v):
+            continue
+        rates = per_subject_at(values, tp, nt, nd, cm, v)[1]
+        c = COLORS[LABEL[d]]
+        ax.scatter(np.full(rates.size, j) + np.linspace(-.19, .19, rates.size), rates,
+                   s=26, color=c, alpha=.75, edgecolor="none", zorder=3)
+        ax.plot([j - .32, j + .32], [np.median(rates)] * 2, color=c, lw=2.5, zorder=4)
+        lo, hi = np.percentile(rates, [10, 90])
+        ax.annotate(f"{GRIDS[d][0]}={v:.3g}\np10-p90 spans {hi / max(lo, 1e-9):.1f}x",
+                    (j, 0.02), xycoords=("data", "axes fraction"), fontsize=7.5,
+                    ha="center", va="bottom", color=c)
+        floor = min(floor, float(rates[rates > 0].min()))
+        print(f"{LABEL[d]:<11}{v:>9.3g}{np.median(rates):>9.2f}"
+              f"{f'{lo:.2f}-{hi:.2f}':>16}{f'{hi / max(lo, 1e-9):.1f}x':>8}")
+    ax.axhline(target, color="0.4", ls="--", lw=1.1)
+    ax.set_yscale("log")
+    if np.isfinite(floor):
+        ax.set_ylim(bottom=floor / 3.0)      # headroom under the lowest dot for the annotations
+    ax.set_xticks(range(len(dets)))
+    ax.set_xticklabels([LABEL[d] for d in dets], fontsize=9)
+    ax.set_ylabel("detections per channel-minute on that subject (log)")
+    ax.set_title(f"(b) ONE parameter, set to give {target:g} det/chan-min over the cohort.\n"
+                 "Dashes = target. Each dot is a subject: the cohort hits it, nobody does",
                  fontsize=9, loc="left")
-    ax.legend(frameon=False, fontsize=9)
     recessive(ax)
     fig.suptitle("Operating points set against 852 expert-marked IEDs, not against each other",
                  fontsize=11)

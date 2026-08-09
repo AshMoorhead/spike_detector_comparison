@@ -1,43 +1,75 @@
 """
 sdc.scoring.report_labelled
 ---------------------------
-The labelled-benchmark result as figures and a machine-readable table.
+The labelled-benchmark result: four panels, each answering a question the others cannot.
 
     .venv\\Scripts\\python.exe -m sdc.scoring.report_labelled
 
-Four outputs, all from the sweep already on disk -- nothing here re-runs a detector:
+  (a) recall vs DETECTION RATE, out to the CEILING. Compare vertically, at equal output. The
+      plateau is the point: where the curve flattens, extra detections buy no extra recall, so
+      whatever is still missed is unreachable at ANY threshold -- a statement about what the
+      detector can SEE rather than where it is set. A curve that was still climbing when its
+      sweep ended gets an ARROW instead of a knee ring, and no ceiling is reported for it: the
+      first version of this panel ringed the last grid point of all three and read out
+      "32% / 29% unreachable" for Barkmeier and Delphos, which was a fact about the grid.
+  (b) LOSO parameter stability -- IQR and far-fold count, not max-min span.
+  (c) per-subject recall, all three at the SAME detection rate.
+  (d) PAIRED per-subject differences at that rate, one sub-row per pair. Each bar is COLOURED
+      BY THE WINNER, so the direction never has to be decoded from an "A - B" label. The pooled
+      gap is a mean; this shows how OFTEN each detector wins and by how much, which is the
+      difference between "better" and "better on average because of four subjects".
 
-  (a) recall vs DETECTION RATE, per detector, with the per-subject spread behind it. Compare
-      VERTICALLY: at equal output, who finds the most expert marks.
-  (b) LOSO fold distribution of the chosen parameter. This is the figure that carries the
-      stability result; until now it existed only as three numbers in a log.
-  (c) per-subject recall at a MATCHED detection rate. The earlier per-subject panel compared
-      detectors at their defaults, i.e. at three different output rates, so it partly plotted
-      the operating points rather than the detectors.
-  (d) runs/sweeps/summary.csv -- every (detector, value) with rate, recall, precision, so the
-      numbers quoted in the README have a source that is not a commit message.
+  plus runs/sweeps/summary.csv, so numbers quoted elsewhere have a source that is not a commit
+  message.
 
-TERMINOLOGY: "detection rate" = detections per channel-minute, the OUTPUT rate. Kept distinct
-from "sensitivity", which in this repo means recall against ground truth. They are the two axes
-of the same curve and conflating them is how the 26-point gap got reported.
+WHAT IS NOT HERE
+  A held-out-recall bar chart: fitting on 10 subjects and reporting recall on 15 just re-reads
+  panel (a). The per-subject ACHIEVED-RATE panel moved to operating_points.py, where it belongs
+  -- it is a statement about operating points rather than about the benchmark.
+
+TERMINOLOGY: "detection rate" = detections per channel-minute, the OUTPUT rate. Distinct from
+"sensitivity", which here means recall against ground truth. They are the two axes of the same
+curve, and conflating them is how a 26-point gap got reported that was really 5-8.
 """
 import csv
+import itertools
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from seeg._style import RED, BLUE, MUTED, GRID, recessive
+from seeg._style import RED, BLUE, MUTED, recessive
 
-from sdc.common.paths import RUNS, figdir
+from sdc.common.paths import figdir
 from sdc.scoring.bids_events import subjects
 from sdc.scoring.pick_operating_point import (matrix, budget_recall, value_for_budget,
-                                              stratified_split, N_TRAIN, TARGETS)
+                                              per_subject_at)
 from sdc.scoring.sweep_labelled import BIDS_ROOT, GRIDS, LABEL, SWEEPS
 
 VIOLET = "#4a3aa7"
 COLORS = {"Janca": RED, "Barkmeier": BLUE, "Delphos": VIOLET}
-MATCH_RATE = 3.5          # det/chan-min for the per-subject panel; mid-range and the only
-                          # region where all three curves overlap
+MATCH_RATE = 3.5      # det/chan-min: mid-range, and where all three curves overlap
+PLATEAU_TOL = 0.005   # recall gain per DOUBLING of rate below which the curve counts as flat
+
+
+def plateau(values, b, r):
+    """The knee of the curve, the recall there, and whether the curve ACTUALLY flattened.
+
+    Defined on recall gain per DOUBLING of detection rate, not per grid step: the grids are not
+    evenly spaced, so a per-step criterion would measure the grid rather than the detector.
+
+    The third return value is the one that stops this being misread. If the last grid point is
+    still gaining recall, the knee lands ON the end of the sweep and the top recall is simply
+    where we ran out of grid -- not a ceiling, and not evidence of anything unreachable. Janca's
+    grid was extended to k1=1.2 for exactly this reason; the other two have not been."""
+    o = np.argsort(b)
+    bb, rr = b[o], r[o]
+    for k in range(len(bb) - 1, 0, -1):
+        if bb[k - 1] <= 0:
+            continue
+        gain = (rr[k] - rr[k - 1]) / max(np.log2(bb[k] / bb[k - 1]), 1e-9)
+        if gain > PLATEAU_TOL:
+            return bb[k], rr[-1], k < len(bb) - 1
+    return bb[0], rr[-1], True
 
 
 def main():
@@ -45,11 +77,9 @@ def main():
     dets = [d for d in GRIDS if (SWEEPS / f"curve_{d}.npy").is_file()]
     M = {d: matrix(d, subs) for d in dets}
     allrows = np.arange(len(subs))
-    tr, te = stratified_split(subs, N_TRAIN)
+    pairs = list(itertools.combinations(dets, 2))
 
-    # ---- (d) the table -------------------------------------------------------------------
-    out_csv = SWEEPS / "summary.csv"
-    with open(out_csv, "w", newline="") as fh:
+    with open(SWEEPS / "summary.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["detector", "param", "value", "det_per_chan_min", "recall",
                     "precision_lower_bound", "tp", "n_true", "n_det"])
@@ -58,39 +88,50 @@ def main():
             b, r = budget_recall(values, tp, nt, nd, cm, allrows)
             for k, v in enumerate(values):
                 w.writerow([LABEL[d], GRIDS[d][0], f"{v:g}", f"{b[k]:.3f}", f"{r[k]:.4f}",
-                            f"{tp[:,k].sum()/max(nd[:,k].sum(),1):.4f}",
+                            f"{tp[:, k].sum() / max(nd[:, k].sum(), 1):.4f}",
                             int(tp[:, k].sum()), int(nt[:, k].sum()), int(nd[:, k].sum())])
-    print(f"[saved] {out_csv}")
+    print(f"[saved] {SWEEPS / 'summary.csv'}")
 
-    fig = plt.figure(figsize=(15.5, 9.5))
-    gs = fig.add_gridspec(2, 3, height_ratios=[1, 1], hspace=0.32, wspace=0.26)
+    fig = plt.figure(figsize=(15.5, 10))
+    gs = fig.add_gridspec(2, 2, hspace=0.36, wspace=0.24)
 
-    # ---- (a) recall vs detection rate, with per-subject spread ---------------------------
-    ax = fig.add_subplot(gs[0, :2])
+    # ---- (a) recall vs detection rate, to the ceiling ------------------------------------
+    ax = fig.add_subplot(gs[0, 0])
+    print("\nrecall CEILING -- where extra detections stop buying recall")
+    print(f"{'detector':<11}{'top recall':>12}{'knee rate':>11}{'unreachable':>13}"
+          f"{'  plateau reached?':>19}")
     for d in dets:
         values, tp, nt, nd, cm = M[d]
         b, r = budget_recall(values, tp, nt, nd, cm, allrows)
         o = np.argsort(b)
-        # per-subject spread at each grid point: IQR, so one subject cannot define the band
-        lo, hi = [], []
-        for k in range(len(values)):
-            rs = tp[:, k] / np.maximum(nt[:, k], 1)
-            lo.append(np.percentile(rs, 25)); hi.append(np.percentile(rs, 75))
-        ax.fill_between(b[o], np.array(lo)[o], np.array(hi)[o],
-                        color=COLORS[LABEL[d]], alpha=.13, lw=0)
-        ax.plot(b[o], r[o], "-o", ms=5, lw=1.9, color=COLORS[LABEL[d]], label=LABEL[d])
-    ax.axvline(MATCH_RATE, color="0.35", ls="--", lw=1.2)
-    ax.annotate(f"{MATCH_RATE:g}", (MATCH_RATE, ax.get_ylim()[0]), fontsize=8, color="0.35",
-                ha="center", va="bottom")
-    ax.set_xlabel("detection rate (detections per channel-minute)")
+        flat = plateau(values, b, r)[2]
+        ax.plot(b[o], r[o], "-o", ms=4.5, lw=1.9, color=COLORS[LABEL[d]],
+                label=LABEL[d] + ("" if flat else "  (grid ends, still rising)"))
+        knee, top, _ = plateau(values, b, r)
+        if flat:
+            ax.plot([knee], [np.interp(knee, b[o], r[o])], "o", ms=13, mfc="none",
+                    mec=COLORS[LABEL[d]], mew=1.8)
+        else:
+            # an arrow, not a ring: the curve was still climbing when the sweep stopped, so
+            # there is no ceiling to report and 1-top is NOT "unreachable".
+            ax.annotate("", xy=(b[o][-1] * 2.1, r[o][-1]), xytext=(b[o][-1], r[o][-1]),
+                        arrowprops=dict(arrowstyle="->", color=COLORS[LABEL[d]], lw=1.6))
+        print(f"{LABEL[d]:<11}{top:>12.3f}{knee:>11.1f}"
+              f"{f'{1 - top:.0%}' if flat else 'n/a':>13}{'yes' if flat else 'NO':>19}")
+    ax.axvline(MATCH_RATE, color="0.4", ls="--", lw=1.1)
+    ax.set_xscale("log")
+    ax.set_xlabel("detection rate (detections per channel-minute, log)")
     ax.set_ylabel("recall vs expert marks")
-    ax.set_title("(a) pooled recall, band = per-subject IQR. Compare VERTICALLY, at equal "
-                 "detection rate", fontsize=9, loc="left")
+    ax.set_title("(a) recall vs output. RING = a real knee: beyond it extra detections buy no\n"
+                 "recall, so what is missed is unreachable. ARROW = still rising when the grid "
+                 "ended", fontsize=9, loc="left")
     ax.legend(frameon=False, fontsize=9)
     recessive(ax)
 
-    # ---- (b) LOSO fold distribution ------------------------------------------------------
-    ax = fig.add_subplot(gs[0, 2])
+    # ---- (b) LOSO parameter stability -----------------------------------------------------
+    ax = fig.add_subplot(gs[0, 1])
+    print(f"\nLOSO PARAMETER stability at rate {MATCH_RATE:g}")
+    print(f"{'detector':<11}{'median':>9}{'IQR':>8}{'beyond 5%':>12}")
     for j, d in enumerate(dets):
         values, tp, nt, nd, cm = M[d]
         picks = []
@@ -103,50 +144,98 @@ def main():
         picks = np.array(picks)
         if not picks.size:
             continue
-        rel = 100 * (picks - np.median(picks)) / np.median(picks)   # % from the median, so the
-        ax.scatter(np.full(rel.size, j) + np.linspace(-.16, .16, rel.size), rel,  # three dials
-                   s=22, color=COLORS[LABEL[d]], alpha=.75, edgecolor="none")     # share an axis
-        ax.plot([j - .28, j + .28], [0, 0], color=COLORS[LABEL[d]], lw=2.5)
-        ax.annotate(f"{picks.max()/picks.min()-1:+.0%} span\nmed {np.median(picks):.3g}",
-                    (j, rel.max() + 1.5), fontsize=7.5, ha="center", color=COLORS[LABEL[d]])
+        rel = 100 * (picks - np.median(picks)) / np.median(picks)
+        ax.scatter(np.full(rel.size, j) + np.linspace(-.17, .17, rel.size), rel, s=24,
+                   color=COLORS[LABEL[d]], alpha=.75, edgecolor="none", zorder=3)
+        ax.plot([j - .3, j + .3], [0, 0], color=COLORS[LABEL[d]], lw=2.5)
+        # IQR and far-fold count, NOT max-min: the span once made Delphos read as "21-27%
+        # unstable" when its typical fold is within 1.5%. Same ordering on every statistic,
+        # magnitude overstated by an order of magnitude.
+        iqr = float(np.subtract(*np.percentile(rel, [75, 25])))
+        far = int((np.abs(rel) > 5).sum())
+        ax.annotate("IQR {:.1f}%\n{}/{} beyond 5%\nmed {:.3g}".format(
+                        iqr, far, rel.size, float(np.median(picks))),
+                    (j, -13.2), fontsize=7.5, ha="center", va="bottom",
+                    color=COLORS[LABEL[d]])
+        print(f"{LABEL[d]:<11}{np.median(picks):>9.3g}{iqr:>7.1f}%{f'{far}/{rel.size}':>12}")
     ax.axhline(0, color=MUTED, lw=.8)
+    ax.set_ylim(-15, None)
     ax.set_xticks(range(len(dets)))
     ax.set_xticklabels([LABEL[d] for d in dets], fontsize=9)
-    ax.set_ylabel(f"chosen parameter, % from median")
-    ax.set_title(f"(b) LOSO stability at rate {MATCH_RATE:g}\n25 folds, one per left-out subject",
-                 fontsize=9, loc="left")
+    ax.set_ylabel("chosen parameter, % from median")
+    ax.set_title("(b) PARAMETER stability across folds -- not recall.\n"
+                 "Leave-one-subject-out, 25 folds", fontsize=9, loc="left")
     recessive(ax)
 
-    # ---- (c) per-subject recall at a MATCHED detection rate ------------------------------
-    ax = fig.add_subplot(gs[1, :])
-    x = np.arange(len(subs))
+    # ---- per-subject recall at the matched rate, shared by (c) and (d) --------------------
+    rec_at = {}
     for d in dets:
         values, tp, nt, nd, cm = M[d]
-        b_all, _ = budget_recall(values, tp, nt, nd, cm, allrows)
-        v = value_for_budget(values, b_all, MATCH_RATE)
-        o = np.argsort(values)
-        ys = []
-        for i in range(len(subs)):
-            rs = tp[i] / np.maximum(nt[i], 1)
-            ys.append(np.interp(v, values[o], rs[o]))
-        ax.plot(x, ys, "-o", ms=4, lw=1.3, color=COLORS[LABEL[d]], label=LABEL[d])
-    ax.set_xticks(x)
-    ax.set_xticklabels([s.replace("sub-", "") for s in subs], fontsize=7)
+        b, _ = budget_recall(values, tp, nt, nd, cm, allrows)
+        v = value_for_budget(values, b, MATCH_RATE)
+        rec_at[LABEL[d]] = (per_subject_at(values, tp, nt, nd, cm, v)[0]
+                            if np.isfinite(v) else np.full(len(subs), np.nan))
+    difficulty = np.nanmean(np.array([rec_at[LABEL[d]] for d in dets]), axis=0)
+    order = np.argsort(difficulty)          # hardest first; (c) and (d) share this ordering,
+                                            # so a subject sits at the same x in both
+
+    # ---- (c) per-subject recall -----------------------------------------------------------
+    ax = fig.add_subplot(gs[1, 0])
+    for d in dets:
+        ax.plot(np.arange(len(subs)), rec_at[LABEL[d]][order], "-o", ms=4, lw=1.3,
+                color=COLORS[LABEL[d]], label=LABEL[d])
+    ax.set_xticks(np.arange(len(subs)))
+    ax.set_xticklabels([subs[i].replace("sub-", "") for i in order], fontsize=6.5)
     ax.set_ylim(0, 1.02)
-    ax.set_xlabel("subject")
+    ax.set_xlabel("subject, hardest first")
     ax.set_ylabel("recall vs expert marks")
-    ax.set_title(f"(c) per subject, all three at the SAME detection rate ({MATCH_RATE:g} "
-                 f"det/chan-min) -- the earlier per-subject panel compared them at their "
-                 f"defaults, i.e. at three different rates", fontsize=9, loc="left")
-    ax.legend(frameon=False, fontsize=9, ncol=3)
+    ax.set_title("(c) per subject, all three at the SAME detection rate "
+                 "({:g} det/chan-min).\nThe spread is BETWEEN-SUBJECT variation in the data, "
+                 "not detector instability".format(MATCH_RATE), fontsize=9, loc="left")
+    ax.legend(frameon=False, fontsize=8, ncol=3)
     recessive(ax)
 
-    fig.suptitle("Detector performance against 852 expert-marked IEDs, 25 subjects",
-                 fontsize=11)
+    # ---- (d) paired differences, coloured by winner ---------------------------------------
+    sub = gs[1, 1].subgridspec(len(pairs), 1, hspace=0.5)
+    print(f"\nPAIRED per-subject differences at rate {MATCH_RATE:g}")
+    print(f"{'pair':<24}{'wins':>12}{'median':>9}{'IQR':>20}")
+    for i, (da, db) in enumerate(pairs):
+        pa, pb = LABEL[da], LABEL[db]
+        axp = fig.add_subplot(sub[i])
+        diff = (rec_at[pa] - rec_at[pb])[order]
+        # colour == winner, so sign and colour carry the same information and neither has to be
+        # decoded from a label. The first version put all three pairs on one axis with an
+        # "A - B" legend, which made "who won" genuinely unreadable.
+        cols = [COLORS[pa] if v > 0 else COLORS[pb] for v in diff]
+        axp.bar(np.arange(len(subs)), diff, 0.72, color=cols)
+        axp.axhline(0, color="0.3", lw=1.0)
+        lim = float(np.nanmax(np.abs(diff))) * 1.35 or 0.1
+        axp.set_ylim(-lim, lim)
+        axp.set_xticks([])
+        axp.tick_params(labelsize=6)
+        w = int(np.nansum(diff > 0))
+        axp.text(0.004, 0.90, f"{pa} better  ({w}/{len(subs)})", transform=axp.transAxes,
+                 fontsize=7.5, color=COLORS[pa], va="top", fontweight="bold")
+        axp.text(0.004, 0.10, f"{pb} better  ({len(subs) - w}/{len(subs)})",
+                 transform=axp.transAxes, fontsize=7.5, color=COLORS[pb], va="bottom",
+                 fontweight="bold")
+        if i == 0:
+            axp.set_title("(d) PAIRED: same subjects, same detection rate. Bar height = "
+                          "margin,\ncolour = winner. A pooled mean cannot say whether a lead "
+                          "is consistent", fontsize=9, loc="left")
+        if i == len(pairs) - 1:
+            axp.set_xlabel("subject, hardest first (same order as (c))", fontsize=8)
+        q1, q3 = np.nanpercentile(diff, [25, 75])
+        print("{:<24}{:>12}{:>+9.3f}{:>20}".format(
+            f"{pa[:4]} vs {pb[:4]}", f"{w}/{len(subs)}", float(np.nanmedian(diff)),
+            f"{q1:+.3f} to {q3:+.3f}"))
+        recessive(axp)
+
+    fig.suptitle("Three detectors against 852 expert-marked IEDs, 25 subjects", fontsize=11)
     out = figdir("labelled") / "labelled_report.png"
     fig.savefig(out, dpi=130, bbox_inches="tight")
     plt.close(fig)
-    print(f"[saved] {out}")
+    print(f"\n[saved] {out}")
 
 
 if __name__ == "__main__":

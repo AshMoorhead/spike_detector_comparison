@@ -59,9 +59,14 @@ GRIDS = {
     # cannot answer from its middle: does recall approach 1.0 if you accept enough detections,
     # or does it plateau? A plateau means expert marks that the detector cannot reach at ANY
     # threshold -- a statement about what it can see, not about where it is set.
+    # Barkmeier and Delphos were extended DOWN for the same reason, and later: at the original
+    # floors (TAMP=100, Spk_thr=8) both curves were still climbing, so their top recall was the
+    # end of the grid rather than a ceiling. Only Janca's plateau was ever real. report_labelled
+    # now refuses to call an unplateaued curve a ceiling, so these floors are what make the
+    # comparison in panel (a) an equal one.
     "janca":     ("k1",      [1.2, 1.6, 2.0, 2.3, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6, 5.0, 5.5, 6.0]),
-    "barkmeier": ("TAMP",    [100, 200, 300, 400, 600, 800, 1000, 1200, 1500]),
-    "delphos":   ("Spk_thr", [8, 15, 30, 50, 80, 120]),    # coarse: see COST
+    "barkmeier": ("TAMP",    [25, 50, 75, 100, 200, 300, 400, 600, 800, 1000, 1200, 1500]),
+    "delphos":   ("Spk_thr", [2, 4, 8, 15, 30, 50, 80, 120]),    # coarse: see COST
 }
 LABEL = {"janca": "Janca", "barkmeier": "Barkmeier", "delphos": "Delphos"}
 

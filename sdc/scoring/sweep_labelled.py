@@ -101,12 +101,47 @@ CEILING = {
 #     left/right half-wave criteria are a pair, and moving one alone measures asymmetry rather
 #     than strictness, so a 2-D sweep should use LD+RD as ONE axis, not two.
 #
+# THE AXES: ONE AMPLITUDE, ONE TIMING. Two knobs are only worth the cost if they gate DIFFERENT
+# properties -- two amplitude knobs just trace the same frontier twice.
+#
+#   Barkmeier   amplitude: STDCoeff and TAMP MOVED TOGETHER as one axis. They are not
+#                          independent -- :116 sets the candidate pool from STDCoeff and :148
+#                          filters it on TAMP, so whichever is stricter binds and the other is
+#                          invisible. Measured: TAMP alone saturates at 10.0 det/chan-min
+#                          (STDCoeff=4 binding); STDCoeff alone saturates at 3.7 (TAMP=1200
+#                          binding). Neither one-at-a-time sweep can find the ceiling.
+#                          Use a single multiplier m -> (std_coeff, TAMP) = (4m, 1200m),
+#                          m in [0.3, 0.45, 0.6, 0.8, 1.0].
+#               timing:    LD+RD, the minimum half-wave DURATION in ms (default 8). Grid
+#                          [2, 4, 6, 8, 10, 14]. Genuinely orthogonal: it sets how fast an
+#                          event may be and still count, independent of how big it is.
+#               LEAVE LS/RS FIXED. Slope is amplitude/duration, so moving it confounds both
+#               axes at once -- it is a shape gate, not a third independent one.
+#
+#   Janca       amplitude: k1 (the existing axis).
+#               timing:    winsize, the background-model window (default 5*fs). This is the
+#                          more interesting second axis than polyspike_union_time, because it
+#                          is the timescale of the SELF-NORMALISATION -- see rate_heterogeneity
+#                          for why that is what compresses between-patient rate differences.
+#                          Grid [1, 2.5, 5, 10, 30] x fs.
+#
+#   Delphos     amplitude: Spk_thr.   timing: Spk_time_thr (default 1.3).
+#               Already a natural amplitude x timing pair, which is the one thing that makes a
+#               2-D Delphos grid tempting. It is still ~50 h; keep it 4 x 3 at most, or leave
+#               Delphos 1-D and spend the time on the other two.
+#
 # WHAT WOULD HAVE TO CHANGE
-#   1. GRIDS entries become a list of axes, e.g.
-#          "barkmeier": [("TAMP", [...]), ("LD+RD", [4, 6, 8, 10, 12])]
-#      and run_point/score_point take a dict of {param: value} instead of one pair. The npz
-#      filename must carry EVERY axis -- with one axis in the name, two grids that differ only
-#      on the second silently collide and the second run is skipped as already-done.
+#   1. GRIDS entries become a list of axes, each mapping ONE scalar to a dict of parameters so
+#      a coupled axis is expressible:
+#          "barkmeier": [("amp", [0.3, 0.45, 0.6, 0.8, 1.0],
+#                                 lambda m: {"std_coeff": 4 * m, "TAMP": 1200 * m}),
+#                        ("dur", [2, 4, 6, 8, 10, 14],
+#                                 lambda v: {"LD": v, "RD": v})]
+#      Drive it through DET_TUNE, not DET_OVERRIDE: DET_TUNE already takes a whole dict per
+#      detector, whereas DET_OVERRIDE's "a+b" syntax sets both params to the SAME value, which
+#      is wrong the moment the two are on different scales (std_coeff 4 vs TAMP 1200).
+#      The npz filename must carry EVERY axis -- with one axis in the name, two grids that
+#      differ only on the second silently collide and the second is skipped as already-done.
 #   2. `value_for_budget` breaks. With one monotone axis, "the parameter that hits 3.5
 #      det/chan-min" is a single interpolation. With two it is a CURVE of combinations that all
 #      hit 3.5, and the operating point is the one on it with the best recall -- i.e. take the

@@ -212,6 +212,37 @@ def main():
     ax.legend(frameon=False, fontsize=8)
     recessive(ax)
 
+    # ---- WHY the slope is compressed, which decides what could fix it --------------------
+    # Two mechanisms, and this separates them. (1) A false-positive FLOOR that does not scale
+    # with the true rate: in a quiet subject almost every detection is floor, so the low end of
+    # the curve is pinned up and the slope falls. (2) The per-channel ADAPTIVE THRESHOLD -- e.g.
+    # Barkmeier's -mean|x| - k*std|x| at mDetectSpike_coeffs.m:116 is computed on the signal
+    # INCLUDING the spikes, so a busy channel raises its own threshold. That is explicit
+    # negative feedback against the quantity being measured.
+    #
+    # If (1) dominates, backing off the operating rate -- fewer, better detections -- must raise
+    # the slope. It does, and slope tracks precision almost 1:1. But even at the best precision
+    # reachable here (~0.30) the slope only gets to ~0.49, so (1) explains roughly half of the
+    # compression and (2) is the rest. Precision is a lever; it is not a cure.
+    print("\nSLOPE vs OPERATING RATE -- is the compression a false-positive floor?")
+    print(f"{'target rate':>12}" + "".join(f"{LABEL[d] + ' slope/prec':>22}" for d in dets))
+    for target in [2.0, 2.5, 3.5, 5.0, 8.0]:
+        cells = []
+        for d in dets:
+            values, tp, nt, nd, cm = M[d]
+            b, r = budget_recall(values, tp, nt, nd, cm, allrows)
+            v = value_for_budget(values, b, target)
+            if not np.isfinite(v):
+                cells.append(f"{'--':>22}")
+                continue
+            rate = per_subject_at(values, tp, nt, nd, cm, v)[1]
+            ok = keep & (rate > 0)
+            sl = np.polyfit(np.log10(truth[ok]), np.log10(rate[ok]), 1)[0]
+            o = np.argsort(values)
+            pr = np.interp(v, values[o], (tp.sum(axis=0) / np.maximum(nd.sum(axis=0), 1))[o])
+            cells.append(f"{sl:>14.2f}{pr:>8.2f}")
+        print(f"{target:>12.1f}" + "".join(cells))
+
     fig.suptitle("Do the detectors track how busy a patient really is?   "
                  f"expert marks span {hi / lo:.0f}x across 25 subjects; the detectors span "
                  f"7-11x", fontsize=11)

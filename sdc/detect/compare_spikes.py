@@ -103,12 +103,10 @@ from sdc.common.invariants import check_run
 # rules switch themselves on and off correctly just by naming the condition.
 BASE_DIR = Path(r"C:\Users\amoo0039\Documents\local")
 META_PATH = BASE_DIR / "data_meta" / "stim_trials.json"
-RECORDINGS = {
-    "P1_pre":  dict(patient=1, trial_index=1, file_type="pre"),
-    "P1_stim": dict(patient=1, trial_index=1, file_type="stim"),
-    "P5_pre":  dict(patient=5, trial_index=1, file_type="pre"),
-    "P5_stim": dict(patient=5, trial_index=1, file_type="stim"),
-}
+from sdc.detect.recordings import (RECORDINGS, edf_path, load_patient_montage,
+                                   montage_path)   # noqa: E402  -- shared with
+                                                  # run_windows.py, which used to keep its own
+                                                  # copy. edf_path is the single resolver.
 RECORDING = os.environ.get("RECORDING", "P1_pre")   # driven per job, like SIM_SNR
 
 SECONDS = 600          # window length (records are 1 s). Kept fixed across recordings so the
@@ -136,6 +134,30 @@ PREP_DELPHOS = os.environ.get('PREP_DELPHOS', '1') == '1'
                       # path does. Get that wrong and it pairs the pairs, silently.
                       # Set 0 to restore the old behaviour (Delphos on the raw file).
 FILL_ALL = os.environ.get('FILL_ALL', '1') == '1'
+PULSE_BLANK_MS = float(os.environ.get('PULSE_BLANK_MS', 0) or 0)
+                      # >0 turns on stimulation-PULSE blanking, an optional stage that runs on
+                      # the RAW native signal before decimation. It must be before the median
+                      # filter, not after: med_kernel=5 at 2 kHz already removes a 1-2 sample
+                      # impulse, so a blank applied to the decimated array would be a no-op.
+PULSE_MAX_PEAK_UV = float(os.environ.get('PULSE_MAX_PEAK_UV', 1e4))
+PULSE_MAX_RAIL_FRAC = float(os.environ.get('PULSE_MAX_RAIL_FRAC', 0.05))
+PULSE_FILL = os.environ.get('PULSE_FILL', 'auto')
+                      # how blanked samples are repaired: 'auto' (interp for runs <= 4 samples,
+                      # AR beyond), 'interp', or 'ar'. At 5 ms / 9 samples 'auto' means AR, and
+                      # AR fill inserts synthesised noise that does not join the surrounding
+                      # samples -- two discontinuities per blank. Delphos detects edges: with
+                      # AR fill 81.9% of its detections landed within +-5 ms of a pulse
+                      # (2% by chance) and its ratio went 1.88 -> 10.69.
+_PB_SUF = ("" if not PULSE_BLANK_MS else
+           f"_pb{PULSE_BLANK_MS:g}{ {'auto': '', 'interp': 'i', 'ar': 'a'}[PULSE_FILL] }")
+                      # ONE definition, used for the npz name AND the prep EDF name. Blanking
+                      # rewrites samples without changing their count, so a differently-filled
+                      # file is the same SIZE -- and Delphos caches on path + size.
+                      # the recoverability gate. Channels above the peak, or railing on more
+                      # than that fraction of pulses, are NOT blanked and therefore keep QC's
+                      # verdict on their untouched signal -- every rule in
+                      # windowed_artefact_detector is per-channel, so no second QC pass is
+                      # needed to achieve that. See seeg.artefact.pulse_channel_gate.
                       # AR-fill the masked samples ONCE, in the shared preprocessed array,
                       # before ANY detector sees it -- including before the EDF Delphos reads.
                       #
@@ -184,6 +206,180 @@ FILL_BAD_SAMPLES = os.environ.get('FILL_BAD', '0') == '1'
                       # It matters even though those regions are masked afterwards, because
                       # Barkmeier's block normalisers (SCALE, std_coeff) are computed over the
                       # whole block INCLUDING the fill. False keeps all three symmetric.
+QC_PROFILE = os.environ.get('QC_PROFILE', 'prod')
+                      # WHICH ARTEFACT MASK. The point of the ladder is to find out how much
+                      # the stimulation result depends on the artefact detector at all, and
+                      # therefore how accurate that detector actually has to be. Every rung is
+                      # a complete end-to-end run: the mask changes, so the AR fill changes,
+                      # so the array every detector sees changes, so the preprocessed EDF
+                      # Delphos reads changes. That is the real pipeline behaviour and the
+                      # thing worth measuring -- a post-hoc re-mask would miss all of it.
+                      #
+                      # Values are overrides onto make_cfg_artefact's output; `dynFloorMult`
+                      # is in multiples of lsb, because an absolute microvolt floor is not
+                      # comparable between recordings.
+QC_PROFILES = {
+    # production: gradThr 400 uV/sample, stimPowerThr 50, floor 3*lsb, dilation 0.50
+    'prod':    {},
+    # masking OFF entirely -- the control that says what the detector is worth. gradThr=0 and
+    # a zero floor disable those two rules by artefact.py's own convention; the stim-power bar
+    # is put out of reach rather than removed so the feature is still computed and stored.
+    'none':    dict(gradThr=0.0, stimPowerThr=1e12, dynFloorMult=0.0, stimDilationThr=0.0),
+    'loose':   dict(gradThr=2000.0, stimPowerThr=200.0, dynFloorMult=0.0, stimDilationThr=0.0),
+    'strict':  dict(gradThr=150.0, stimPowerThr=10.0, stimDilationThr=0.25),
+    'vstrict': dict(gradThr=50.0, stimPowerThr=2.0, stimDilationThr=0.10),
+    # ---- artefact-handling comparison (plans/polymorphic-wiggling-breeze.md) ---------------
+    # Condition C: the CURRENT windowed detector on a 2x2 of its two live knobs, with dynR
+    # held at 3*lsb. kStim is RELATIVE (K x the paired baseline's per-channel band power);
+    # gradThr is ABSOLUTE uV/sample. k450g1000 is finalv2 by another name and is kept as a
+    # separate entry so the four cells are read as one grid rather than three plus a special
+    # case -- and because finalv2's stored runs are at Janca dec=0, which this is not.
+    'k150g150':   dict(kStim=150.0, gradThr=150.0,  dynFloorMult=3.0),
+    'k150g1000':  dict(kStim=150.0, gradThr=1000.0, dynFloorMult=3.0),
+    'k450g150':   dict(kStim=450.0, gradThr=150.0,  dynFloorMult=3.0),
+    'k450g1000':  dict(kStim=450.0, gradThr=1000.0, dynFloorMult=3.0),
+    # Condition B: MNE's annotate_amplitude, whole-channel rejection only, no epoch masking.
+    # Dispatched by NAME (see _qc_run below) rather than by cfg, because it is a different
+    # detector and not a different threshold. The number is `peak` in uV/sample: despite the
+    # function name it is a sustained consecutive-sample GRADIENT test, so these are the same
+    # two rungs as gradThr above and B reads directly against C.
+    # 75 and 150, not 150 and 1000: at 1000 the rule drops nothing at all on the 2 Hz recording
+    # (max p99 |diff| there is 2,749 uV/sample against P1_stim's 193,006), so that arm would
+    # have been condition A under another name. Both live rungs are now tighter than gradThr's
+    # production value, which is the direction the evidence points.
+    # gradThr OFF, isolating kStim. The 2x2 above showed kStim barely moves anything while
+    # gradThr moves it a lot (k150->k450 at g150: 0.442 -> 0.457; g150->g1000 at k150:
+    # 0.442 -> 0.860), so these say whether kStim contributes at all once grad is removed.
+    'k150g0': dict(kStim=150.0, gradThr=0.0, dynFloorMult=3.0),
+    'k450g0': dict(kStim=450.0, gradThr=0.0, dynFloorMult=3.0),
+    # E1: kStim + dynR + PERIODICITY, no gradThr. periodicity_index returns NaN above 10 Hz, so
+    # on the 145 Hz file this is exactly k150g0 and should reproduce it -- that equality is a
+    # free check that the periodicity gate is really inert at high stim frequency.
+    # Threshold 5 from sdc.artefact.periodicity_check: flags 60% of 2 Hz stim channel-epochs
+    # against 2.7% of the stim-free baseline recording.
+    'e1': dict(kStim=150.0, gradThr=0.0, dynFloorMult=3.0, periodicityThr=5.0),
+    # Second periodicity rung. On the 2 Hz file thr 5 flags 53.5% of stim
+    # channel-epochs and 2.4% of the stim-free baseline; thr 10 is stricter still.
+    # Identical to e1 on any 145 Hz or baseline file, where periodicity is inert.
+    'e1t10': dict(kStim=150.0, gradThr=0.0, dynFloorMult=3.0, periodicityThr=10.0),
+    # Under the CLINICAL montage the clinician has already removed the worst 62 of 226 contacts,
+    # so these drop far fewer than the same thresholds did on the derived set (14 vs 22 at 75).
+    # On P1_stim: 10 -> ~35, 15 -> 32, 25 -> 21, 75 -> 14, 150 -> 8 of 164.
+    # dynR ONLY: no stim-spectral rule, no gradient, no dilation. The floor you would always
+    # want on -- it removes epochs whose dynamic range is under 3*lsb, where a spike is
+    # physically impossible, and that is 18-24% of Janca's BASELINE detections. Used as the
+    # reference for the pulse-blanking rows so the comparison isolates blanking rather than
+    # confounding it with epoch masking, while still not crediting blanking for flat-epoch
+    # false positives it did nothing about.
+    'dynr': dict(gradThr=0.0, stimPowerThr=1e12, dynFloorMult=3.0, stimDilationThr=0.0),
+    # dynR + a LOOSE gradient, no stim-spectral rule. Pairs with pulse blanking: blanking
+    # removes the pulses it can reach, and grad=1000 catches the residual too large to blank.
+    # gradThr=1000 is inert at 145 Hz (within 0.4% of off) but removes 37% of Janca's
+    # detections at 2 Hz -- the low-frequency pulses are big enough to clear it, the
+    # high-frequency ones are not. So this profile is a 2 Hz instrument by construction.
+    'dynrg1000': dict(gradThr=1000.0, stimPowerThr=1e12, dynFloorMult=3.0, stimDilationThr=0.0),
+    'mnebads10':  {},
+    'mnebads15':  {},
+    'mnebads25':  {},
+    'mnebads75':  {},
+    'mnebads150': {},
+    # ---- stimPowerThr sweep: everything else HELD AT PRODUCTION ----------------------------
+    # The five profiles above move three rules at once, and the QC-feature attribution showed
+    # that is wasted effort: stim_spec does essentially all the masking (on P5 the "any rule"
+    # share equals it almost exactly), lf_artefact is nearly a subset of it below vstrict, and
+    # low_dyn never varies because dynFloorMult stays at 3.0 throughout. So the only knob worth
+    # a ladder is this one, and moving it alone makes the result attributable.
+    #
+    # Points chosen from the dumped features to step the masked ON fraction evenly rather than
+    # by guessing thresholds (P1 / P5 share of stim-ON channel-epochs):
+    #   1000 -> 35% / 15%   the stim rule effectively OFF; isolates gradThr + dropout
+    #    200 -> 37% / 21%
+    #     50 -> 41% / 35%   = production, already on disk
+    #     10 -> 58% / 58%
+    #      2 -> 80% / 83%
+    'sp1000': dict(stimPowerThr=1000.0),
+    'sp200':  dict(stimPowerThr=200.0),
+    'sp10':   dict(stimPowerThr=10.0),
+    'sp2':    dict(stimPowerThr=2.0),
+
+    # ---- THE FINALISED OPERATING POINT ----------------------------------------------------
+    # Chosen by viewing traces on three files -- P1 ANT 145 Hz, P5 ANT 145 Hz, P1 ANT 2 Hz --
+    # not read off a curve. None of the three features shows a clean two-population shelf, so
+    # there is no data-driven optimum to find; the curves say what a choice COSTS, and the
+    # trace says whether it is right.
+    #
+    #   kStim 450    RELATIVE, x each channel's median band power in its paired pre file.
+    #                Nearly useless below ~60 Hz -- at 2 Hz the +-5 Hz band is delta and the
+    #                stimulated and pre distributions almost coincide (5.5% flagged vs 26.7%
+    #                at 145 Hz) -- so on low-frequency trials grad carries the mask alone.
+    #   gradThr 4000 ABSOLUTE uV/sample. Deliberately NOT relative: movement artefact is a
+    #                large gradient in absolute terms, and dividing by a high-amplitude
+    #                channel's own baseline scales the threshold straight past it.
+    #   floor 3*lsb  unchanged. A dropout test against the quantiser is a device-level fact,
+    #                and a dead channel is dead whatever its normal amplitude.
+    #
+    # Against production this is about the same on P1 (39% vs 41% of stim-ON masked), looser on
+    # P5 (20% vs 35%), and far looser on the 2 Hz file (10% vs 92%) -- production's absolute
+    # gradThr=400 masks almost the whole of a recording whose median gradient is 142 uV/sample.
+    'final':  dict(kStim=450.0, gradThr=4000.0, dynFloorMult=3.0),
+
+    # finalv2: 'final' with gradThr LOWERED 4000 -> 1000, after the 2 Hz grad sweep. A SEPARATE
+    # NAME rather than a redefinition, because redefining one silently turned the runs on disk
+    # into a mixture -- four at 1000 and fourteen at 4000, every one of them stamped
+    # qc_profile='final' -- and put the same run on the sweep axis twice, once mislabelled.
+    #
+    # Janca's stim/baseline ratio at 2 Hz is flat at 0.84-0.89 for grad <= 1500 and climbs to
+    # 1.14 by 6000; Barkmeier, artefact-immune here (0.0x enrichment at every rung), sits at
+    # 0.89-0.90 throughout. Cost: 189 channels vs 204, 17.5% of ON time masked vs 10.5%.
+    # Nearly a no-op at 145 Hz, where grad is inert -- turning it OFF moves masked-ON by 0.1
+    # points and it uniquely flags 0.12% of ON channel-epochs.
+    #
+    # NOT SETTLED: Delphos reads 1.42-2.64 at 2 Hz at EVERY grad rung, so no threshold in this
+    # family reconciles it with the other two. See sweeps.py.
+    'finalv2': dict(kStim=450.0, gradThr=1000.0, dynFloorMult=3.0),
+
+    # --- SWEEPS AROUND 'final'. One knob moves; everything else stays at 'final' exactly, so a
+    # difference between rungs is attributable to that knob. 'final' itself changed TWO things
+    # at once against production (pStim absolute-50 -> relative-450, gradThr 400 -> 4000), which
+    # is why its result cannot be compared with the old absolute ladder to decide whether the
+    # relative scheme or the grad change was responsible.
+    #
+    # A: pStim on P1's 145 Hz file. Masked-ON at each rung, measured from the stored QC features
+    #    before running anything: 42.0 / 40.9 / 38.8(final) / 36.3 / 34.9 %.
+    'k225':   dict(kStim=225.0, gradThr=4000.0, dynFloorMult=3.0),
+    'k300':   dict(kStim=300.0, gradThr=4000.0, dynFloorMult=3.0),
+    'k675':   dict(kStim=675.0, gradThr=4000.0, dynFloorMult=3.0),
+    'k1000':  dict(kStim=1000.0, gradThr=4000.0, dynFloorMult=3.0),
+
+    # B: grad on P1's 2 Hz file, where pStim is inert -- the +-5 Hz band at 2 Hz IS delta, so
+    #    grad is the only rule doing anything. Masked-ON: 12.0 / 11.4 / 10.5(final) / 8.6 %, with
+    #    the knee between 1000 and 2000, which is why the rungs are not symmetric about 4000.
+    'g1500':  dict(kStim=450.0, gradThr=1500.0, dynFloorMult=3.0),
+    'g2000':  dict(kStim=450.0, gradThr=2000.0, dynFloorMult=3.0),
+    'g3000':  dict(kStim=450.0, gradThr=3000.0, dynFloorMult=3.0),
+    'g6000':  dict(kStim=450.0, gradThr=6000.0, dynFloorMult=3.0),
+
+    # 300 is chosen to sit just BELOW U13_U14's median stim gradient (320 uV/sample), the worked
+    # example of a quiet channel that carries visible 2 Hz artefact through both rules and makes
+    # Delphos read 8.8x its baseline rate. 4000 is the pre-finalv2 operating point, kept so the
+    # ladder spans the decision rather than sitting to one side of it.
+    'g300':   dict(kStim=450.0, gradThr=300.0, dynFloorMult=3.0),
+    'g4000':  dict(kStim=450.0, gradThr=4000.0, dynFloorMult=3.0),
+
+    # The LOW end of grad on the 2 Hz file. 'final' at 4000 sits between p90 (2566) and p95
+    # (15447) of the stim-ON gradRatio distribution, so it catches only the top ~8% -- and at
+    # 2 Hz grad is the ONLY rule doing anything, because pStim measures +-5 Hz around the
+    # fundamental while the artefact is a harmonic comb. Unlike the HF pStim sweep, this region
+    # of the distribution is DENSE: 4000 -> 1000 moves masked-ON 10.5% -> 17.5% and costs 14
+    # channels, so these rungs buy masking at a real price and the cost has to be read alongside.
+    'g500':   dict(kStim=450.0, gradThr=500.0, dynFloorMult=3.0),
+    'g750':   dict(kStim=450.0, gradThr=750.0, dynFloorMult=3.0),
+    'g1000':  dict(kStim=450.0, gradThr=1000.0, dynFloorMult=3.0),
+    'g1250':  dict(kStim=450.0, gradThr=1250.0, dynFloorMult=3.0),
+}
+if QC_PROFILE not in QC_PROFILES:
+    raise SystemExit(f"QC_PROFILE={QC_PROFILE!r}; expected one of {sorted(QC_PROFILES)}")
+
 QC_NATIVE = os.environ.get('QC_NATIVE', '1') == '1'
                       # run windowed_artefact_detector at the file's own 2 kHz rather than on
                       # the decimated array. gradThr is a PER-SAMPLE threshold with no rate
@@ -212,7 +408,18 @@ DILATE_MS = TROUGH_SEARCH_MS + 20   # artefact-exclusion radius, applied to EVER
                       # DERIVED, not a literal: this is seeg.detect_spikes' own default
                       # (its 40 ms trough search + a 20 ms buffer). Writing 60 here would
                       # silently stop tracking trough_search_ms the moment it is swept.
+BASELINE_SEC = float(os.environ.get('BASELINE_SEC', 300))
+                      # How much of the PRE file sets the per-channel relative stim threshold,
+                      # taken from its END. 300 s is a comparability choice, not a precision one:
+                      # the threshold is stable to ~15% at any window from 60 s up, and a 15%
+                      # threshold error moves under 1% of channel-epochs, well inside the plateau
+                      # a 4.4x sweep of K traced. Capping matters because the cohort's baselines
+                      # span 43-4162 s, so an uncapped rule gives trials thresholds built on
+                      # wildly different amounts of data AND different amounts of drift.
 MASK_ARTEFACTS = True # drop detections inside the dilated artefact mask (all detectors alike)
+REJECTED = {}         # {detector: [per-channel indices the mask removed]}, filled by _finalise.
+                      # Module-level rather than returned so the three call sites and every
+                      # downstream reader of _finalise keep their existing signatures.
 MERGE_MS = 100.0      # shared polyspike rule: marks closer than this collapse to one.
                       # A cutoff this size puts the comparison at EVENT level not COMPONENT level,
                       # and that choice is forced by Delphos: it detects time-frequency BLOBS,
@@ -244,6 +451,44 @@ ONLY = os.environ.get("ONLY", "").lower()
                       # sweep moves one detector's knob, so running the other two at every grid
                       # point is pure waste -- and for Barkmeier each run pays a fresh MATLAB
                       # engine start. 25 subjects x 6 points x 2 idle detectors is hours.
+BARK_SCALE = float(os.environ.get("BARK_SCALE", 0) or 0) or None
+                      # Barkmeier's block target amplitude. None keeps seeg.spikes.SCALE (70).
+                      # WHY THIS IS SETTABLE: `scale = SCALE / median(mean|EEG|)` is computed per
+                      # block per RECORDING, and TAMP is absolute and applied AFTER scaling -- so
+                      # a condition that raises the block amplitude silently RAISES the effective
+                      # threshold. Measured on P1 ANT 2 Hz: the denominator is 17.64 uV at
+                      # baseline and 25.06 uV during stimulation, moving the effective TAMP from
+                      # 302 to 430 uV, so Barkmeier is 42% more conservative during stim for
+                      # reasons that have nothing to do with spiking. At 145 Hz epoch masking
+                      # restores the denominator (18.96 vs 18.88) and the effect vanishes.
+                      # Passing SCALE * (denom_stim / denom_base) for the stim file reproduces
+                      # the baseline's scale factor and makes the threshold condition-invariant.
+                      # This is a deliberate deviation from Barkmeier et al., who normalise per
+                      # block for single-recording detection and never compare conditions.
+                      #
+                      # SUPERSEDED BY BARK_DENOM BELOW -- prefer that. This knob back-solves one
+                      # constant SCALE from a PYTHON RECONSTRUCTION of the denominator, and it
+                      # measurably overshoots: on P1 ANT 2 Hz it took Barkmeier's gated ratio
+                      # 0.516 -> 0.977, past Janca (0.742) and Delphos (0.771), i.e. it swapped
+                      # the sign of the error instead of removing it. Two reasons, both fixed by
+                      # BARK_DENOM: the reconstruction does not reproduce mDetectSpike's
+                      # artifactChans handling, and one constant cannot undo a normaliser that
+                      # is recomputed every block -- it corrects a second time what the
+                      # per-block renormalisation already partly corrected.
+BARK_DENOM = os.environ.get("BARK_DENOM", "") or None
+_BD_SUF = ("" if not BARK_DENOM else
+           "_bdauto" if BARK_DENOM == "auto" else f"_bd{float(BARK_DENOM):g}")
+                      # Pin Barkmeier's per-block amplitude normaliser, so a stim recording and
+                      # its baseline are detected at the SAME absolute threshold. A float, or
+                      # 'auto' to take it from the paired baseline run's stored block
+                      # denominators. This is the RIGHT version of BARK_SCALE: the value comes
+                      # from mDetectSpike itself (4th output, added for this) rather than from a
+                      # reconstruction, and it replaces the per-block normaliser outright rather
+                      # than trying to cancel it with a constant.
+                      #
+                      # BOTH RECORDINGS MUST GET THE SAME VALUE, baseline included. Pinning only
+                      # the stim file leaves the baseline adapting per block and the stim file
+                      # not, which is a different comparison, not a corrected one.
 RUN_DELPHOS = os.environ.get("RUN_DELPHOS", "1") == "1"
                       # False -> skip the Delphos arm entirely (2-panel raster, as before).
                       # run_windows.py sets RUN_DELPHOS=0 for every window and runs Delphos
@@ -265,7 +510,14 @@ VIOLET = "#4a3aa7"    # Delphos; from the QC palette -- third hue, no red/green 
 # pt=MERGE_MS/1000 does not give Janca a MERGE_MS floor.
 # Set JANCA = dict(dec=0) and JANCA_PT = None to restore Janca's published default (0.12 s)
 # and accept the asymmetry.
-JANCA = dict(dec=0, fl=10.0, fh=50.0)   # band narrowed from the 10-60 default
+# dec=200 is the PAPER's resampling ("to maintain filter characteristics constant") and is now
+# the repo-wide Janca operating point -- see sdc.scoring.tune_marks.JANCA_FIXED, which every
+# tuning and sweep module imports. It was dec=0 here, so this script alone ran a Janca nothing
+# else did. Measured against the marked blocks, dec=200 costs 0.022 marked macro F1 but is 5x
+# faster and gives visibly tighter across-patient agreement (paired SE roughly halves), which is
+# what matters for a pipeline that must generalise to unmarked patients.
+# fh=50, not the paper's 60: 50 Hz mains sits inside a 60 Hz upper edge on this hardware.
+JANCA = dict(dec=200.0, fl=10.0, fh=50.0)
 BARK = dict(LS=3.0, RS=3.0, TAMP=1200.0, LD=8, RD=8,
             # 1200 is the REAL-DATA operating point, tuned to match Janca's count. Do not move
             # it for a simulation experiment: it was briefly dropped to 400 for a sim sweep and
@@ -409,11 +661,15 @@ if not BIDS_SUBJECT:
     REC_META = dict(rec_id="sim" if SIMULATE else RECORDING, patient=-1, condition="sim",
                     stim_hz=float("nan"))
 if not SIMULATE and not BIDS_SUBJECT:
+    # ONE resolver, shared with run_windows.plan() and qc_features.dump(). This block used to
+    # run the trial_index chain itself, which is only meaningful against the JSON the index came
+    # from: the cohort is defined against AES_trials.json, so resolving it through the local
+    # stim_trials.json gave two trials the WRONG recording outright and two baselines a bare
+    # '.edf'. Four copies of this chain existed and each had to be found separately.
     _cfg = RECORDINGS[RECORDING]
-    _entry = get_trial(get_patient(load_trials(META_PATH), _cfg["patient"]),
-                       _cfg["trial_index"])
-    _stem, TRIAL = resolve_file(_entry, _cfg["file_type"])
-    EDF = str(BASE_DIR / f"P{_cfg['patient']}" / f"{_stem}.edf")
+    _path, TRIAL = edf_path(RECORDING)
+    _stem = _path.stem
+    EDF = str(_path)
     REC_META = dict(rec_id=RECORDING, patient=_cfg["patient"], condition=_cfg["file_type"],
                     stim_hz=float(TRIAL["stim_frequency"]) if TRIAL else float("nan"))
     # The filename carries any DEVIATION from the canonical config, and nothing else. A run at
@@ -431,11 +687,21 @@ if not SIMULATE and not BIDS_SUBJECT:
         "" if QC_NATIVE else "_qcdec",
         "_fillbad" if FILL_BAD_SAMPLES else "",
         "" if MERGE_MS == 100.0 else f"_merge{MERGE_MS:g}",
+        # BEFORE the qc suffix: run_windows._VAR_SUF appends _QC_SUF last, and its
+        # comment requires this list to mirror that order exactly. Getting it wrong
+        # writes windows as _qcX_pbY while merge_windows looks for _pbY_qcX.
+        _PB_SUF,
+        # A PINNED Barkmeier normaliser is a different detector configuration and must not
+        # share a filename with an unpinned one. It is added automatically rather than left to
+        # RUN_TAG, because BARK_SCALE was left to RUN_TAG and that is exactly how a run gets
+        # written into the canonical file by someone who forgot the tag.
+        _BD_SUF,
+        "" if QC_PROFILE == "prod" else f"_qc{QC_PROFILE}",
     ])
     DETECTIONS_NPZ = _ROOT / "runs" / f"{RECORDING}{_variant}.npz"
     if _variant:
         print(f"[config] non-canonical run -> {DETECTIONS_NPZ.name}")
-    print(f"--- {RECORDING}: P{_cfg['patient']} trial {_cfg['trial_index']} "
+    print(f"--- {RECORDING}: P{_cfg['patient']} "
           f"{_cfg['file_type']} -> {_stem}.edf"
           + (f"  ({TRIAL['target']} {TRIAL['stim_frequency']}Hz"
              f"{', intermittent' if TRIAL.get('intermittent') else ''})" if TRIAL else "") + " ---")
@@ -468,7 +734,18 @@ if not SIMULATE and not BIDS_SUBJECT:
     # derive_montage's contact regex matches SIM1..SIM16 and WOULD build 15 pairs
     # SIM1_SIM2, SIM2_SIM3, ... Re-montaging already-bipolar sim channels would smear every
     # ground-truth spike across two pairs with opposite polarity, so the sim skips this.
-    rec = apply_montage(rec, derive_montage(rec["info"]["SelectedSignals"]))
+    # CLINICAL montage where one exists, and a hard failure where it does not. This line called
+    # derive_montage unconditionally for the whole life of the project, so every run used 226
+    # consecutively-paired contacts instead of the clinician's 164 -- silently, because a
+    # derived montage always succeeds. See recordings.load_patient_montage.
+    _mont = load_patient_montage(_cfg["patient"],
+                                 allow_derived=os.environ.get("MONTAGE", "") == "derived")
+    if _mont is None:
+        _mont = derive_montage(rec["info"]["SelectedSignals"])
+        print(f"[montage] DERIVED: {len(_mont)} pairs")
+    else:
+        print(f"[montage] clinical {montage_path(_cfg['patient']).name}: {len(_mont)} pairs")
+    rec = apply_montage(rec, _mont)
 
 # Stim detection MUST come after the montage (stim_channels are post-montage PAIR names) and
 # before the QC. make_cfg_artefact(lsb, trial) on its own does NOTHING: the stim-spectral rule
@@ -477,6 +754,45 @@ if not SIMULATE and not BIDS_SUBJECT:
 if TRIAL is not None:
     rec["info"]["stim_trial"] = TRIAL
     rec = detect_stim(rec)
+
+PULSE_INFO = {}
+_RAW_FOR_QC = None
+                      # The UNBLANKED native array, kept so windowed_artefact_detector scores
+                      # the signal as it really was. QC MUST NOT SEE THE BLANKED SIGNAL: its
+                      # lf_artefact rule fires on max|diff|, blanking removes exactly that
+                      # gradient, and the 50-105 ms decay a 5 ms blank cannot reach is left
+                      # behind -- so blanking first does not clean a contaminated channel, it
+                      # stops QC noticing one. Measured on P1 ANT 2 Hz: blanking before QC
+                      # admitted 21 channels QC had excluded outright, and Delphos then fired
+                      # 44.8/chan-min on them against 8.7 on the rest.
+if PULSE_BLANK_MS and TRIAL is not None:
+    from seeg import detect_pulses, blank_pulses, pulse_channel_gate
+    from seeg.stim import get_stim_channel, _stim_column
+    _sch = get_stim_channel(rec, verbose=False)
+    _pm, _pi = detect_pulses(_stim_column(rec, _sch), rec["info"]["SampleRate"],
+                             stim_hz=float(TRIAL["stim_frequency"]))
+    _elig, _tbl = pulse_channel_gate(rec, _pm, max_peak_uv=PULSE_MAX_PEAK_UV,
+                                     max_rail_frac=PULSE_MAX_RAIL_FRAC)
+    # blank_pulses returns a NEW array, so this reference keeps the pre-blank signal alive
+    # for QC at no extra memory or compute.
+    _RAW_FOR_QC = np.asarray(rec["data"], float)
+    rec, _bi = blank_pulses(rec, _pm, method=PULSE_FILL, blank_ms=PULSE_BLANK_MS,
+                            channels=_elig)
+    PULSE_INFO = {"stim_channel": _sch, **{k: _pi[k] for k in
+                  ("n_pulses", "threshold", "median_isi_ms", "median_width_ms",
+                   "frac_isi_on_period")},
+                  "n_eligible": int(_elig.sum()), "n_gated_out": int((~_elig).sum()),
+                  **{k: v for k, v in _bi.items() if k != "method"}}
+    print(f"[pulse] {_sch}: {_pi['n_pulses']} pulses, ISI {_pi['median_isi_ms']:.1f} ms "
+          f"(expected {1000 / float(TRIAL['stim_frequency']):.1f}), "
+          f"on-period {_pi['frac_isi_on_period']:.3f}")
+    print(f"[pulse] gate {PULSE_MAX_PEAK_UV:g} uV / {PULSE_MAX_RAIL_FRAC:.0%} railed -> "
+          f"{_elig.sum()}/{_elig.size} channels blanked at {PULSE_BLANK_MS:g} ms "
+          f"({_bi['blanked_frac_of_blanked_channels']:.2%} of each); "
+          f"gated out: {', '.join(t['ch'] for t in _tbl if not t['eligible']) or 'none'}")
+    print("[pulse] QC will score the UNBLANKED signal; blanking only cleans what QC passes")
+elif PULSE_BLANK_MS:
+    print("[pulse] PULSE_BLANK_MS set but this is not a stim trial -- skipping")
 
 dec = decimate_recording(rec, factor=FACTOR, med_kernel=MED_KERNEL)
 fs = dec["info"]["SampleRate"]
@@ -487,13 +803,190 @@ n_chan = len(names)
 # in dec["raw"], so this costs nothing extra -- and it keeps stim_bins and the QC epochs in the
 # SAME sample space, which is the difference between isOn being right and being wrong by FACTOR.
 if QC_NATIVE:
-    _qc_rec = {"data": dec["raw"]["data"],
+    # dec["raw"] is whatever was decimated, which under pulse blanking is the BLANKED array --
+    # see _RAW_FOR_QC above for why QC must not be given that.
+    _qc_src = _RAW_FOR_QC if _RAW_FOR_QC is not None else dec["raw"]["data"]
+    _qc_rec = {"data": _qc_src,
                "info": {**rec["info"], "SampleRate": dec["raw"]["fs"],
-                        "NSamples": dec["raw"]["data"].shape[0]}}
+                        "NSamples": _qc_src.shape[0]}}
 else:
     _qc_rec = dec
 _qc_fs = _qc_rec["info"]["SampleRate"]
-qc = windowed_artefact_detector(_qc_rec, make_cfg_artefact(hdr["lsb"], trial=TRIAL))
+QC_CFG = make_cfg_artefact(hdr["lsb"], trial=TRIAL)
+if QC_PROFILES[QC_PROFILE]:
+    _ov = dict(QC_PROFILES[QC_PROFILE])
+    if "dynFloorMult" in _ov:                       # multiples of lsb -> absolute uV
+        _ov["minDynRangeFloor"] = _ov.pop("dynFloorMult") * hdr["lsb"]
+    # A RELATIVE stim-power threshold: K times each channel's own median band power in the
+    # paired stim-free pre recording. artefact.py compares `ps > cfg["stimPowerThr"]` where
+    # `ps` is (n_chan,), so handing it a (n_chan,) ARRAY is a per-channel threshold and needs
+    # no change to the pipeline at all.
+    #
+    # Why relative: an absolute bar cannot transfer between patients, amplifiers or implant
+    # depths, and this cohort spans 8 patients. Why the MEDIAN and not a high percentile: a
+    # percentile makes the normaliser hostage to a few contaminated baseline epochs -- P1's H
+    # shaft has a p95 five orders of magnitude above its median, and under a p95 baseline those
+    # channels were never flagged at any K despite being obviously contaminated.
+    if "kStim" in _ov and TRIAL is None:
+        # A baseline recording. `make_cfg_artefact(trial=None)` leaves stimHz None, which
+        # disables the stim-spectral rule outright -- so there is no threshold for a relative
+        # one to scale, and no frequency to measure a baseline AT. Dropping the knob is the
+        # whole correct behaviour here. Without this the LF-continuous pre files (which must be
+        # run, because a continuous trial has no OFF period and the pre file IS the comparison)
+        # looked for `<rec>_f0.npz` and aborted.
+        _ov.pop("kStim")
+        print("[qc] baseline recording: no stimulation, so the relative stim threshold is not "
+              "applied (the stim-spectral rule is off).")
+    if "kStim" in _ov:
+        _k = _ov.pop("kStim")
+        _pre_rec = RECORDING.replace("_stim", "_pre")
+        _fhz = float(TRIAL["stim_frequency"])
+        _fp = _ROOT / "qc_features" / f"{_pre_rec}_f{_fhz:g}.npz"
+        if not _fp.is_file():
+            raise SystemExit(
+                f"{_fp.name} not found. A relative stim threshold needs the paired pre "
+                f"recording's band power AT THIS TRIAL'S FREQUENCY ({_fhz:g} Hz) -- a baseline "
+                f"measured at another frequency is a different quantity. Dump it first:\n"
+                f"    QC_STIM_HZ={_fhz:g} python -c \"from sdc.artefact.qc_features import "
+                f"dump; dump('{_pre_rec}', freq={_fhz:g})\"")
+        _zb = np.load(_fp, allow_pickle=False)
+        if [str(s) for s in _zb["names"]] != list(names):
+            raise SystemExit(f"{_fp.name} channel names differ from this run; a per-channel "
+                             f"threshold cannot be aligned.")
+        # CHECK THE CONTENTS, NOT THE NAME. A dump named `_f145` held 2 Hz band power for 11 of
+        # 17 baselines (QC_STIM_HZ was pinned by the first dump in the process), and nothing
+        # downstream could tell -- the threshold was simply wrong and the runs looked fine.
+        if "stim_hz_used" not in _zb.files:
+            raise SystemExit(
+                f"{_fp.name} predates the stim_hz_used field, so the frequency it was measured "
+                f"at cannot be confirmed and its filename is not evidence. Re-dump it:\n"
+                f"    python -c \"from sdc.artefact.qc_features import dump; "
+                f"dump('{_pre_rec}', freq={_fhz:g})\"")
+        _mhz = float(_zb["stim_hz_used"])
+        if abs(_mhz - _fhz) > 1e-6:
+            raise SystemExit(
+                f"{_fp.name} was measured at {_mhz:g} Hz but this trial stimulates at {_fhz:g} Hz. "
+                f"Band power at another frequency is a different quantity and cannot threshold "
+                f"this recording. Re-dump the baseline at {_fhz:g} Hz.")
+        # THE LAST `BASELINE_SEC` OF THE PRE FILE, not the whole thing. Band power drifts, and
+        # the baseline always precedes the stim recording, so its final window is the closest in
+        # time to what this threshold has to predict. Measured against the stim file's own
+        # stim-OFF band power, the last 300 s more than halves the mismatch on P5 (median
+        # |log2| 0.202 whole-file -> 0.092) and changes nothing on P1, whose baseline is only
+        # 650 s so the two windows nearly coincide. More baseline is NOT better: two disjoint
+        # 600 s windows of the same file disagree more than two 60 s ones, because the limit is
+        # non-stationarity rather than sample size.
+        _pa = _zb["pStimAll"]
+        _t = np.asarray(_zb["t"], float) if "t" in _zb.files else None
+        _ep = float(np.median(np.diff(_t))) if _t is not None and _t.size > 1 else 2.0
+        _nk = max(int(round(BASELINE_SEC / max(_ep, 1e-6))), 1)
+        _used = _pa[-_nk:] if _pa.shape[0] > _nk else _pa
+        _ov["stimPowerThr"] = _k * np.maximum(np.median(_used, axis=0), 1e-12)
+        print(f"[qc] relative stim threshold: K={_k:g} x per-channel baseline from "
+              f"{_fp.name}, last {_used.shape[0] * _ep:.0f}s of {_pa.shape[0] * _ep:.0f}s "
+              f"(median {np.median(_ov['stimPowerThr']):.3g})")
+    QC_CFG.update(_ov)
+    print(f"[qc] profile {QC_PROFILE!r}: " +
+          ", ".join(f"{k}={np.median(QC_CFG[k]):g}" if np.ndim(QC_CFG[k]) else
+                    f"{k}={QC_CFG[k]:g}" for k in sorted(_ov)))
+def _qc_run(rec, cfg, profile):
+    """Dispatch on the profile NAME: some conditions are a different detector, not a threshold.
+
+    `mnebadsN` -> MNE's annotate_amplitude at peak=N uV/sample, whole-channel rejection only.
+
+    The list is READ, not recomputed. A bad channel is a property of the recording, not of a
+    60 s window, and `annotate_amplitude`'s `bad_percent` is evaluated against whatever span it
+    is handed -- so computing it per window would let a channel come and go, which is epoch
+    masking at window granularity wearing a bad-channel label. `sdc.artefact.mne_bads_check.dump`
+    writes the whole-recording list once; this reads it by NAME.
+
+    min_duration in that dump is 2 ms, NOT MNE's 5 ms default: at 5 ms a channel swinging
+    +-150 mV is not flagged at any threshold above ~400 uV/sample, because pulsatile artefact has
+    huge gradients at pulse edges and small ones between and so never stays above threshold for
+    10 consecutive samples. Measured on P1_stim -- see seeg.artefact_mne.mne_bad_channels.
+    """
+    if not profile.startswith("mnebads"):
+        return windowed_artefact_detector(rec, cfg)
+
+    import json
+    from seeg.artefact_mne import _empty_qc, _finalise
+
+    peak = float(profile[len("mnebads"):])
+    fp = _ROOT / "runs" / "mne_bads" / f"{RECORDING}_p{peak:g}.json"
+    if not fp.is_file():
+        raise SystemExit(
+            f"{fp.name} not found. Condition {profile!r} needs the WHOLE-RECORDING bad-channel "
+            f"list, which must be computed once before windowing. Dump it first:\n"
+            f"    python -c \"from sdc.artefact.mne_bads_check import dump; "
+            f"dump(('{RECORDING}',))\"")
+    meta = json.loads(fp.read_text(encoding="utf-8"))
+    names_here = [str(n) for n in rec["info"]["SelectedSignals"]]
+    bads = [b for b in meta["bads"]]
+    missing = [b for b in bads if b not in names_here]
+    if missing:
+        raise SystemExit(f"{fp.name} names {missing[:5]} which this run does not have; the "
+                         f"montage differs between the dump and this run.")
+    idx = [names_here.index(b) for b in bads]
+    qc = _empty_qc(rec, cfg)
+    if idx:
+        qc["epoch"]["bad"][:, idx] = True
+        for c in idx:
+            qc["epoch"]["reason"][:, c] = "mne_bad_channel"
+    qc["features"]["mne_bads"] = np.array(bads, dtype=object)
+    qc["features"]["mne_bad_idx"] = np.asarray(idx, int)
+    print(f"[qc] mne_bads peak={peak:g} uV/sample (min_duration={meta['min_duration']*1000:g} ms)"
+          f": {len(idx)}/{len(names_here)} channels dropped, from {fp.name}")
+    return _finalise(qc, rec, cfg)
+
+
+qc = _qc_run(_qc_rec, QC_CFG, QC_PROFILE)
+# ---- QC-ONLY: dump the features and stop, without running a single detector -------------
+# The three rules are thresholded inside windowed_artefact_detector and only their VERDICT
+# survives, so "which rule did the masking" cannot be answered from a finished run. The
+# features themselves are threshold-independent, so dumping them once makes the composition of
+# the mask at ANY threshold pure arithmetic -- no detector, no MATLAB, no Delphos, minutes
+# instead of hours. QC_FEATURES=<path> writes and exits.
+_QC_FEATURES = os.environ.get("QC_FEATURES", "")
+if _QC_FEATURES:
+    if QC_PROFILE.startswith("mnebads"):
+        raise SystemExit(
+            f"QC_FEATURES dumps dynR/pStim/gradRatio, which only the windowed detector "
+            f"computes -- {QC_PROFILE!r} is MNE's annotate_amplitude and produces a channel "
+            f"list instead. Dump the features under a windowed profile (they are "
+            f"threshold-independent, so one dump serves every rung), or inspect this "
+            f"condition with sdc.artefact.mne_bads_check.")
+    _f = qc["features"]
+    # pStim as stored is nan outside stim-ON epochs, because the rule is only evaluated there.
+    # That makes a BASELINE impossible -- and a baseline is exactly what a relative threshold
+    # needs. bandpower_stim is public, so recompute it on EVERY epoch here. On a stim-free
+    # recording (TRIAL is None, stimHz unset) QC_STIM_HZ supplies the frequency to measure at,
+    # which is how the pre files provide the null distribution for the stim band.
+    from seeg.artefact import bandpower_stim as _bps
+    _sh = float(os.environ.get("QC_STIM_HZ", 0) or 0) or float(QC_CFG.get("stimHz") or 0)
+    _es = int(qc["epoch"]["epochSamp"])
+    _xq = _qc_rec["data"]
+    if _sh > 0:
+        _p_all = np.array([_bps(_xq[s:s + _es, :], _qc_fs, _sh, QC_CFG["stimBW_Hz"])
+                           for s in qc["epoch"]["starts"]], dtype=np.float32)
+    else:
+        _p_all = np.full_like(_f["gradRatio"], np.nan, dtype=np.float32)
+    Path(_QC_FEATURES).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        _QC_FEATURES,
+        dynR=_f["dynR"].astype(np.float32),
+        pStim=_f["pStim"].astype(np.float32),
+        gradRatio=_f["gradRatio"].astype(np.float32),
+        pStimAll=_p_all, stim_hz_used=np.float64(_sh),
+        starts=np.asarray(qc["epoch"]["starts"], np.int64),
+        isOn=np.asarray(qc["epoch"]["isOn"], bool),
+        epoch_samp=np.int64(qc["epoch"]["epochSamp"]),
+        qc_fs=np.float64(_qc_fs), lsb=np.float64(hdr["lsb"]),
+        names=np.array(list(names)), rec_id=str(RECORDING),
+        start_rec=np.int64(START_REC), stop_rec=np.int64(STOP_REC))
+    print(f"[qc-only] wrote {Path(_QC_FEATURES).name}: "
+          f"{_f['dynR'].shape[0]} epochs x {_f['dynR'].shape[1]} channels")
+    raise SystemExit(0)
+
 if TRIAL is not None:
     _tags = {t for r in qc["epoch"]["reason"].ravel() if r for t in r.split(",")}
     _on = qc["epoch"]["isOn"]
@@ -556,6 +1049,31 @@ if FILL_ALL and np.any(dmask):
     print(f"[fill] AR-filled {dmask.mean():.2%} of samples (dilated mask); "
           f"mean |x| {_before:.1f} -> {np.mean(np.abs(dec['data'])):.1f} uV")
 
+# ---- Barkmeier's normaliser, recorded for every run -----------------------------------
+# mDetectSpike divides SCALE by median(mean|EEG|) per block and applies TAMP/LS/RS AFTER that,
+# so this number IS Barkmeier's effective threshold up to a constant. It is printed on every
+# run because it is the one detector parameter that the RECORDING changes underneath us: two
+# conditions can differ in Barkmeier rate purely because masking moved this, with no threshold
+# having been touched. Printing it makes that visible instead of inferable.
+#
+# Computed on the array the detector is actually handed -- post median-5, post decimation, POST
+# AR-FILL -- and with NO sample mask, because mDetectSpike never receives one (seeg.spikes
+# line ~327 fills the masked samples instead). So epoch masking reaches the normaliser only
+# through the fill, which is exactly the mechanism this print exposes.
+try:
+    from seeg.spikes import scale_denominator as _scale_denom
+    _denom = _scale_denom(dec)
+    print(f"[bark] scale denominator median(mean|EEG|) = {_denom:.2f} uV  "
+          f"-> scale {70.0 / _denom:.3f}, effective TAMP {1200.0 * _denom / 70.0:.0f} uV")
+except Exception as _e:                                  # never let a diagnostic kill a run
+    _denom = float("nan")
+    print(f"[bark] scale denominator unavailable: {_e}")
+
+if os.environ.get("SCALE_ONLY") == "1":
+    # Measure the normaliser across QC profiles without paying for any detector.
+    print(f"[scale-only] {RECORDING} {QC_PROFILE} denom={_denom:.4f}")
+    raise SystemExit(0)
+
 # Per-sample stim ON/OFF on the DETECTION grid, expanded from the QC epochs. Stored rather than
 # used to pre-split, because a Delphos call is ~5 min: the split definition has to be
 # changeable downstream without re-running anything.
@@ -605,9 +1123,30 @@ if PREP_DELPHOS and RUN_DELPHOS and not SIMULATE and not BIDS_SUBJECT:
     # after a config change -- and so Delphos's cache (keyed on path + size) cannot collide.
     PREP_EDF = str(_prep_dir / f"{REC_META['rec_id']}{WINDOW_TAG}"
                    f"_med{MED_KERNEL}_{fs:g}Hz{'_fill' if FILL_ALL else '_nofill'}"
+                   f"{'' if QC_PROFILE == 'prod' else '_qc' + QC_PROFILE}"
+                   # blanking rewrites samples without changing their count, so a blanked file
+                   # is the same SIZE as an unblanked one -- and Delphos's cache keys on
+                   # path + size, so an unsuffixed name returns the unblanked result silently
+                   f"{_PB_SUF}"
                    f"_{START_REC}-{STOP_REC}.edf")
-    if Path(PREP_EDF).is_file():
-        print(f"[prep] reusing {Path(PREP_EDF).name}")
+    _reuse = Path(PREP_EDF).is_file()
+    if _reuse:
+        # The cache key is the FILENAME, which encodes the profile and variant but NOT the
+        # montage -- so a prep EDF written under a different montage is served silently, and
+        # Delphos then runs on a different channel set from Janca and Barkmeier while the npz
+        # records one list of names. Found for real: P1_stim_..._qcnone.edf held 226 derived
+        # pairs while this run used the clinical 164. Check the count, do not trust the name.
+        try:
+            _n_have = int(read_edf_header(PREP_EDF)["NumSignals"])
+        except Exception as _e:                       # unreadable -> rewrite rather than guess
+            print(f"[prep] {Path(PREP_EDF).name} unreadable ({_e}); rewriting")
+            _n_have, _reuse = -1, False
+        if _reuse and _n_have != len(names):
+            print(f"[prep] {Path(PREP_EDF).name} has {_n_have} channels but this run has "
+                  f"{len(names)} -- montage changed; rewriting")
+            _reuse = False
+    if _reuse:
+        print(f"[prep] reusing {Path(PREP_EDF).name} ({len(names)} channels)")
     else:
         print(f"[prep] writing {Path(PREP_EDF).name} "
               f"({dec['data'].shape[0]} x {dec['data'].shape[1]} at {fs:g} Hz) ...")
@@ -693,7 +1232,11 @@ def _janca_pt(merge_ms, fs):
     return pt
 
 
-JANCA_PT = _janca_pt(MERGE_MS, fs)
+# The rate the UNION actually runs at, which is the decimated one: _spike_detector calls
+# _decimate and REASSIGNS fs before `_detection_union(..., pt * fs)`. Passing DETECT_FS here
+# while Janca decimates to 200 Hz would compute pt for a 5x higher rate, shrinking the internal
+# union to a fifth of the intended floor -- silently, since the result is still a valid merge.
+JANCA_PT = _janca_pt(MERGE_MS, float(JANCA["dec"]) or fs)
 
 
 def _finalise(per_chan, label=None):
@@ -711,17 +1254,28 @@ def _finalise(per_chan, label=None):
     the mask is itself a result (it says how artefact-prone that detector is)."""
     gap = MERGE_MS / 1000.0 * fs
     n_raw = n_masked = n_merged = 0
-    out = []
+    out, rej = [], []
     for c in range(n_chan):
         idx = np.unique(np.asarray(per_chan[c], int))
         idx = idx[(idx >= 0) & (idx < dmask.shape[0])]
         n_raw += idx.size
         if MASK_ARTEFACTS:
+            # Keep what the mask threw away. Storing only the survivors makes the stored run a
+            # one-way door: a STRICTER mask can be applied afterwards by dropping more, but a
+            # LOOSER one cannot, because the detections it would readmit are already gone. That
+            # asymmetry is what forced a full re-run per rung of the threshold ladder. These
+            # go to the npz under `{Det}_idx_masked` and are NOT part of any result -- the
+            # kept arrays keep their exact previous meaning.
+            rej.append(merge_close(idx[dmask[idx, c]], gap))
             idx = idx[~dmask[idx, c]]
+        else:
+            rej.append(np.zeros(0, int))
         n_masked += idx.size
         idx = merge_close(idx, gap)
         n_merged += idx.size
         out.append(idx)
+    if label:
+        REJECTED[label] = rej
     if label:
         print(f"  [{label}] {n_raw} detected"
               f" -> artefact mask {'ON' if MASK_ARTEFACTS else 'OFF'}: "
@@ -744,17 +1298,49 @@ def run_janca(data, label=None, **override):
                       for c in range(n_chan)], label)
 
 
+def _resolve_bark_denom():
+    """BARK_DENOM -> a float, or None. 'auto' reads the PAIRED BASELINE run for this profile.
+
+    Auto deliberately fails loudly rather than falling back to per-block normalisation: a run
+    that silently reverted would be indistinguishable in the npz from one that was pinned, and
+    it would sit in a figure column captioned as corrected.
+    """
+    if not BARK_DENOM:
+        return None
+    if BARK_DENOM != "auto":
+        return float(BARK_DENOM)
+    base_rec = RECORDING.replace("_stim", "_pre")
+    f = _ROOT / "runs" / f"{base_rec}_qc{QC_PROFILE}.npz"
+    if not f.is_file():
+        raise SystemExit(
+            f"BARK_DENOM=auto needs the paired baseline run {f.name}, which does not exist.\n"
+            f"  Run the baseline FIRST (unpinned), then the stim file with BARK_DENOM=auto.")
+    with np.load(f, allow_pickle=False) as _z:
+        if "bark_block_denom" not in _z.files or not _z["bark_block_denom"].size:
+            raise SystemExit(
+                f"{f.name} predates the block-denominator output and does not carry one.\n"
+                f"  Re-run the baseline once (no BARK_DENOM) to record it, then retry.")
+        d = float(np.median(_z["bark_block_denom"]))
+    print(f"[bark] BARK_DENOM=auto -> {d:.3f} uV, median block denominator of {f.name}")
+    return d
+
+
+BARK_DENOM_VALUE = _resolve_bark_denom()
+BARK_OUT = {}          # receives {"block_denom": ...} from the detector, stored in the npz
+
+
 def run_bark(recording, label=None, **override):
     """Barkmeier -> per-channel sample indices. Override LS/RS/TAMP/LD/RD/std_coeff/... by keyword."""
     p = {**BARK, **override}
-    detect_barkmeier(recording, QC_DET, post_mask_spikes=False,
+    detect_barkmeier(recording, QC_DET, post_mask_spikes=False, out=BARK_OUT,
+                     fixed_denom=BARK_DENOM_VALUE,
                      # FILL_BAD_SAMPLES: seeg defaults this True, which AR-fills masked regions
                      # for Barkmeier only. Its block normalisers are computed over the whole
                      # block INCLUDING the fill, so it is not neutralised by the later mask.
                      fill_bad_samples=FILL_BAD_SAMPLES,
                      det_thresholds=[p["LS"], p["RS"], p["TAMP"], p["LD"], p["RD"]],
                      std_coeff=p["std_coeff"], trough_search_ms=p["trough_search_ms"],
-                     filter_spec=p["filter_spec"])
+                     filter_spec=p["filter_spec"], scale=BARK_SCALE)
     return _finalise([np.asarray(s, int) for s in recording["info"]["DetectedSpikes"]], label)
 
 
@@ -820,6 +1406,14 @@ def _dump_detections(dets, path, extra=None):
         dump[f"{name}_chan"] = (np.concatenate([np.full(d.size, c, int)
                                                 for c, d in enumerate(det)]) if det
                                 else np.zeros(0, int))
+        # The detections the artefact mask removed, same (index, channel) flattening. Present
+        # so a LOOSER mask can be evaluated after the fact; see the note in _finalise.
+        r = REJECTED.get(name)
+        dump[f"{name}_idx_masked"] = (np.concatenate(r) if r and any(x.size for x in r)
+                                      else np.zeros(0, int))
+        dump[f"{name}_chan_masked"] = (np.concatenate([np.full(x.size, c, int)
+                                                       for c, x in enumerate(r)])
+                                       if r and any(x.size for x in r) else np.zeros(0, int))
     # Post-processing provenance goes in EVERY dump, real or simulated. Without it the
     # downstream plots have to hardcode the settings, and they go stale silently the moment a
     # constant here moves -- spike_statistics.py annotated its ISI histogram with a fixed
@@ -832,7 +1426,26 @@ def _dump_detections(dets, path, extra=None):
                  # preprocessing toggles -- these MOVE the numbers, so a run that does not
                  # record them cannot be compared with one that does
                  "qc_native": np.int64(bool(QC_NATIVE)), "med_kernel": np.int64(MED_KERNEL),
+                 "qc_profile": str(QC_PROFILE),
                  "fill_all": np.int64(bool(FILL_ALL)),
+                 "baseline_sec": float(BASELINE_SEC),
+                 # Barkmeier's per-block amplitude normaliser, AS MDETECTSPIKE COMPUTED IT, plus
+                 # the value it was pinned to (nan = not pinned, i.e. published behaviour). Both
+                 # stored because they are what makes two runs' Barkmeier rates comparable or
+                 # not, and because BARK_DENOM=auto reads the first of these back off the paired
+                 # baseline run. A run with neither key predates the 4th MATLAB output.
+                 "bark_block_denom": np.asarray(BARK_OUT.get("block_denom", []), float),
+                 "bark_fixed_denom": float(BARK_DENOM_VALUE if BARK_DENOM_VALUE
+                                           else float("nan")),
+                 "bark_scale": float(BARK_SCALE if BARK_SCALE else float("nan")),
+                 "pulse_blank_ms": float(PULSE_BLANK_MS),
+                 "pulse_fill": str(PULSE_FILL),
+                 "pulse_max_peak_uv": float(PULSE_MAX_PEAK_UV),
+                 "pulse_n": np.int64(PULSE_INFO.get("n_pulses", 0)),
+                 "pulse_thr": float(PULSE_INFO.get("threshold", float("nan"))),
+                 "pulse_isi_ms": float(PULSE_INFO.get("median_isi_ms", float("nan"))),
+                 "pulse_n_gated_out": np.int64(PULSE_INFO.get("n_gated_out", 0)),
+                 "pulse_blank_frac": float(PULSE_INFO.get("blanked_frac", 0.0)),
                  # WHICH FILE DELPHOS READ. Before this existed, a run with the median filter
                  # on and one with it off were indistinguishable in the npz, and they are not
                  # comparable -- Delphos saw a different signal in each.
@@ -862,6 +1475,8 @@ def _dump_detections(dets, path, extra=None):
     for name, det, _ in dets:
         idx = dump[f"{name}_idx"]
         dump[f"{name}_on"] = ON_MASK[idx] if idx.size else np.zeros(0, bool)
+        midx = dump.get(f"{name}_idx_masked", np.zeros(0, int))
+        dump[f"{name}_on_masked"] = ON_MASK[midx] if midx.size else np.zeros(0, bool)
     dump.update(extra or {})
     # Structural checks BEFORE the write: a wrong number here becomes a result, and the
     # cross-detector disagreement this project leans on cannot see errors in shared code.
@@ -935,8 +1550,26 @@ if ONLY in ("", "barkmeier"):
     try:
         bark = run_bark(dec, label="Barkmeier")
         dets.append(("Barkmeier", bark, BLUE))
-    except Exception as e:        # no MATLAB / engine failure -> skip that arm
-        print(f"[warn] Barkmeier unavailable ({type(e).__name__}: {e}); skipping that arm.")
+    except Exception as e:        # no MATLAB / engine failure
+        # SKIPPING IS ONLY SAFE ON A MACHINE WITH NO MATLAB AT ALL. A TRANSIENT failure -- the
+        # licence server being briefly unreachable ("Unable to launch MVM server", error 5001)
+        # -- is different in kind: the batch keeps going, this window is written and CACHED with
+        # Janca only, and every later re-run reuses it. The merged file then reports a Barkmeier
+        # rate missing one whole window, which on a 5-window recording is a ~20% undercount that
+        # looks entirely plausible. That happened, and only a hand check caught it.
+        #
+        # So a failure is fatal by default and opt-out only. run_windows also refuses to merge
+        # windows with mismatched detector sets, but that is the second line of defence: it
+        # cannot repair the cached window, it can only tell you to delete it.
+        if os.environ.get("ALLOW_MISSING_BARKMEIER") != "1":
+            raise SystemExit(
+                f"Barkmeier failed: {type(e).__name__}: {e}\n"
+                f"  REFUSING to write a run without it -- a cached window missing one detector "
+                f"is silent and permanent.\n"
+                f"  If this is a licence hiccup, just re-run; completed windows are reused.\n"
+                f"  On a machine with no MATLAB at all, set ALLOW_MISSING_BARKMEIER=1.")
+        print(f"[warn] Barkmeier unavailable ({type(e).__name__}: {e}); skipping that arm "
+              f"(ALLOW_MISSING_BARKMEIER=1).")
         bark = [np.zeros(0, int) for _ in range(n_chan)]
 
 if RUN_DELPHOS and ONLY in ("", "delphos"):

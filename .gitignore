@@ -51,3 +51,11 @@ prep_edf/
 *_rate.xlsx
 *_crossrates_with_spikes.xlsx
 *_coocrates_with_spikes.xlsx
+#
+# qc_features/  -- per-recording artefact-feature dumps (~35 MB). Written by
+#                  qc_features.dump and read back by the RELATIVE stim threshold (kStim is K x
+#                  each channel's median band power in its paired pre file). Regenerable, and
+#                  the cache is keyed per recording+frequency, so a stale entry is a real
+#                  hazard: a 226-channel dump made before the clinical montage landed caused
+#                  every kStim condition to fail silently. Delete the directory to rebuild.
+qc_features/

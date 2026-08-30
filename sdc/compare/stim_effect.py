@@ -5,11 +5,36 @@ What does each detector say stimulation did to the spike rate?
 
     .venv\\Scripts\\python.exe -m sdc.compare.stim_effect runs/P1_stim.npz
 
-This exists because the three detectors do not agree on the SIGN of the effect: on P1, pooled
-over the channels measurable in both conditions, the ON/OFF rate ratio is Janca 0.57,
-Barkmeier 0.31, Delphos 0.90. That is not a small quantitative disagreement -- it is "spikes
-more than halved" versus "nothing happened", from the same 600 seconds. A single figure that
-puts the three side by side is the only honest way to present it.
+SUPERSEDED FOR THE EFFECT ITSELF -- USE sdc.artefact.blocks
+  This page compares ALL of stim-ON against ALL of stim-OFF, and that design does not survive
+  scrutiny. ON and OFF are different minutes of the night, so anything that drifts across the
+  recording enters the comparison as an effect. `sdc.artefact.blocks` contrasts each ON block
+  against the OFF time immediately beside it, which cancels drift by construction, and it is
+  the number to quote. Keep this page for the per-channel and per-segment VIEWS, which the
+  block design does not draw.
+
+  Two claims that used to be in this docstring were wrong and are corrected here.
+
+  1. "The detectors do not agree on the SIGN of the effect ... Janca 0.57, Barkmeier 0.31,
+     Delphos 0.90." Those numbers came from a 600 s window -- 55% of P1_stim and only 16% of
+     P5_stim -- and two of the three are not sign disagreements at all; 0.57, 0.31 and 0.90 are
+     all below 1. On the FULL files with the block-paired design and a geometric mean over
+     channels, P1 reads 0.60 / 0.59 / 0.89 and P5 reads 0.84 / 0.92 / 0.87. The real
+     disagreement is one of MAGNITUDE, and it is specific to Delphos: it is the outlier in both
+     patients and in opposite directions, which a genuine sensitivity difference would not do.
+
+  2. Every confidence interval this script has ever printed is too narrow, by a factor of
+     roughly 2-3. It bootstraps CHANNELS, which assumes channels are what varies between
+     replications of the experiment. They are not -- all channels share the same minutes, so
+     their errors are correlated, and channel resampling is structurally blind to the dominant
+     noise. Measured directly by imposing a fake stimulation pattern on the stim-free baseline
+     recordings, that interval excludes "no effect" 46-100% of the time against a nominal 5%
+     (sdc.artefact.nullcheck). Treat any significance claim on this page as unsupported.
+
+  What survives at the block-paired design with an exact sign-flip permutation test: nothing on
+  P5, and on P1 only Barkmeier at p=0.047 -- which is 3 of 64 possible sign assignments, one
+  step off the floor of 2/64, and uncorrected for six tests. Six ON blocks cannot do better;
+  see the power note in sdc.artefact.blocks.
 
 Unlike `evaluate_detectors.py --COND`, this reads BOTH conditions at once, so it lives in its
 own script rather than being a fourth view there.

@@ -21,12 +21,31 @@ WHY NOT THE MEAN OVER ALL CHANNELS
   second, and it is the only comparator here defined INDEPENDENTLY OF THE DETECTORS: the EZ
   contact list is clinical, and comes from the trials JSON rather than from anything measured.
 
+ONE CHANNEL SET PER PATIENT, SHARED BY EVERY CONDITION AND EVERY DETECTOR
+  This figure used to take each condition's median over whatever channels survived in THAT
+  condition. On P1 that is 223 channels in stim OFF and 132 in stim ON, because the artefact
+  mask removes the contaminated ones -- so the two medians described different implants and the
+  difference between them was partly just that. It mattered: Barkmeier read 1.89 -> 2.77 that
+  way, a 47% INCREASE under stimulation, against 0.59 -- a 41% decrease -- once the same
+  channels are used on both sides. A sign flip, from nothing but the channel set.
+
+  So the mask is now intersected across baseline, stim OFF and stim ON, and across all three
+  detectors, and every median on the page is over that one common set. The medians are still
+  medians; what changed is what they are medians OF. The cost is printed, because intersecting
+  discards channels and that should be visible rather than assumed small.
+
 WHAT IT CANNOT TELL YOU
   Whether the EZ list is right. It is a clinical judgement, so a detector that disagrees with it
   is not thereby wrong. And the EZ is ~20 channels of ~200, so its median carries real sampling
   noise -- the MAD is drawn for that reason and should be read, not skipped.
+
+  It is also still a LEVEL comparator, not an effect estimate. Pairing the channels removes the
+  worst confound but not the others: stim ON and stim OFF are different minutes of the night,
+  and a rate that drifts will show up here as a condition difference. For the ON/OFF effect
+  itself use sdc.artefact.blocks, which contrasts each ON block against the OFF time beside it.
 """
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -59,8 +78,15 @@ def ez_channels(patient_id):
     return list(p.get("EZ") or [])
 
 
+RUN_TAG = os.environ.get("RUN_TAG", "")
+# "" = the canonical runs at each detector's default operating point; "_tuned" = the BIDS
+# operating points (k1 4.482, TAMP 890, Spk_thr 46.2), fitted to 3.5 det/chan-min against 852
+# expert-marked IEDs. Kept as a suffix rather than a replacement so both result sets stay on
+# disk and a figure can never be silently the wrong one -- the tag goes in the filename too.
+
+
 def load(stem, label):
-    z = np.load(RUNS / f"{stem}.npz", allow_pickle=False)
+    z = np.load(RUNS / f"{stem}{RUN_TAG}.npz", allow_pickle=False)
     names = [str(s) for s in z["names"]]
     sel = cond.select(z, label)
     dets = [str(s) for s in z["detectors"]]
@@ -91,21 +117,57 @@ def main():
     data = {}
     for pat, specs in PATIENTS:
         for stem, label, cond_lab in specs:
-            if not (RUNS / f"{stem}.npz").is_file():
-                continue
+            if not (RUNS / f"{stem}{RUN_TAG}.npz").is_file():
+                continue          # must test the SAME file load() will open, tag included
             data[(pat, cond_lab)] = load(stem, label)
     if not data:
         raise SystemExit("no runs found")
     dets = next(iter(data.values()))["dets"]
     conds = ["baseline", "stim OFF", "stim ON"]
 
+    # ---- one channel set per patient -----------------------------------------------------
+    # Intersected over every condition AND every detector, so that each patient's three boxes
+    # describe the same contacts. Without this the stim-ON box is drawn over the subset of the
+    # implant that survived the artefact mask, and is compared against a stim-OFF box drawn
+    # over nearly all of it.
+    common, cost = {}, {}
+    for pat, specs in PATIENTS:
+        keys = [(pat, cl) for _, _, cl in specs if (pat, cl) in data]
+        if not keys:
+            continue
+        names0 = data[keys[0]]["names"]
+        m = np.ones(len(names0), bool)
+        per_cond = {}
+        for k in keys:
+            if data[k]["names"] != names0:
+                raise SystemExit(
+                    f"{pat}: channel names differ between {keys[0][1]!r} and {k[1]!r}; the "
+                    f"conditions cannot be paired by position.")
+            c_m = np.ones(len(names0), bool)
+            for d in dets:
+                c_m &= np.isfinite(data[k]["rates"][d])
+            per_cond[k[1]] = int(c_m.sum())
+            m &= c_m
+        common[pat] = m
+        cost[pat] = (per_cond, int(m.sum()), len(names0))
+
+    print("channels per patient after intersecting conditions x detectors")
+    for pat, (per_cond, n_common, n_all) in cost.items():
+        print(f"  {pat}: " + ", ".join(f"{k} {v}" for k, v in per_cond.items())
+              + f"  ->  common {n_common} of {n_all} implanted")
+    print()
+
     def vals(key, det, scope):
         c = data[key]
-        v = c["rates"][det]
-        v = v[c["ez"]] if scope == "EZ" else v
+        m = common[key[0]].copy()
+        if scope == "EZ":
+            ez = np.zeros(m.size, bool)
+            ez[c["ez"]] = True
+            m &= ez
+        v = c["rates"][det][m]
         return v[np.isfinite(v)]
 
-    print("per-channel rate, spikes/min   (median +- MAD)\n")
+    print("per-channel rate, spikes/min   (median +- MAD)   -- PAIRED channel set\n")
     for scope in ("all", "EZ"):
         print(f"  -- {scope} channels --")
         print(f"{'':<12}" + "".join(f"{d:>22}" for d in dets))
@@ -161,18 +223,24 @@ def main():
         mid = pi * (len(dets) + GAP) + (len(dets) - 1) / 2
         axes[0].text(mid, 1.04, pat, transform=axes[0].get_xaxis_transform(),
                      ha="center", va="bottom", fontsize=13, fontweight="bold")
-    axes[0].set_title("(a) every channel with enough analysable time", fontsize=9, loc="left")
-    axes[1].set_title("(b) EZ contacts only -- clinically defined, independent of any detector",
-                      fontsize=9, loc="left")
+    axes[0].set_title("(a) all channels in the common set -- the SAME contacts in all three "
+                      "conditions", fontsize=9, loc="left")
+    axes[1].set_title("(b) EZ contacts within that common set -- clinically defined, "
+                      "independent of any detector", fontsize=9, loc="left")
     axes[1].set_xticks(centres)
     axes[1].set_xticklabels(tick_lab, fontsize=9)
     handles = [plt.Line2D([], [], color=COND_COLOR[c], lw=3, label=c) for c in conds]
     axes[0].legend(handles=handles, frameon=False, fontsize=9, ncol=3, loc="upper right")
-    fig.suptitle("Per-channel rate: P1 vs P5, by detector and condition  |  "
-                 "on the EZ, P5 is ~a third of P1; on the whole implant that shrinks to "
-                 "two thirds (Barkmeier: to nothing)", fontsize=11)
+    # The channel counts belong in the title rather than a caption: they are what makes this
+    # page comparable to itself, and the previous version's headline numbers were wrong
+    # precisely because they were computed over different sets without saying so.
+    fig.suptitle("Per-channel rate by detector and condition, over ONE channel set per "
+                 f"patient ({', '.join(f'{p} {cost[p][1]}/{cost[p][2]}' for p in cost)} "
+                 "contacts, common to baseline / stim OFF / stim ON and to all 3 detectors)\n"
+                 "Levels only -- ON and OFF are different minutes of the night, so for the "
+                 "stimulation EFFECT see sdc.artefact.blocks", fontsize=10)
     fig.tight_layout()
-    out = figdir("real") / "rate_comparators.png"
+    out = figdir("real") / f"rate_comparators{RUN_TAG}.png"
     fig.savefig(out, dpi=130)
     plt.close(fig)
     print(f"[saved] {out}")

@@ -48,15 +48,54 @@ from seeg.edf import window_bounds
 from sdc.common.paths import ROOT, RUNS
 from sdc.common.invariants import check_run
 
+# Delphos is ~60% of a run's wall time and is nondeterministic at 5-10% from RAM tiling, so a
+# threshold sweep is often better answered by the two DETERMINISTIC detectors first. This was
+# honoured for the per-window jobs but not by the merge stage, which called Delphos regardless.
+# Skipping it also skips the assembled EDF, which exists only to feed Delphos. The per-window
+# Janca/Barkmeier results are cached either way, so adding Delphos afterwards re-runs only the
+# merge, not the sweep.
+MERGE_DELPHOS = os.environ.get("RUN_DELPHOS", "1") == "1"
+
 RECORDING = os.environ.get("RECORDING", "P1_pre")
-RUN_TAG = os.environ.get("RUN_TAG", "")
+QC_PROFILE = os.environ.get("QC_PROFILE", "prod")
+_QC_SUF = "" if QC_PROFILE == "prod" else f"_qc{QC_PROFILE}"
+                      # The artefact profile has to reach every path this driver touches, for
+                      # exactly the reason spelled out below for RUN_TAG. It is folded into
+                      # this module's RUN_TAG rather than exported, because compare_spikes
+                      # appends the same suffix itself from the inherited QC_PROFILE -- so the
+                      # child and the parent independently build the identical filename, and
+                      # adding it to the child's environment as well would double it.
+# MED_KERNEL and FILL_ALL change the CONTENT of every window file and every decimated array,
+# and compare_spikes already puts them in its own filename. This driver did not, so the child
+# wrote `P1_stim_med1_nofill_qcnone_w001.npz` while the driver looked for
+# `P1_stim_qcnone_w001.npz` -- and, worse, `dec_dir` was keyed on the QC profile alone, so a
+# MEDIAN-FILTERED decimated array would have been silently reused for an unfiltered run. The
+# order here mirrors compare_spikes' `_variant` exactly so the two names agree.
+_MED = int(os.environ.get("MED_KERNEL", 5))
+_FILL = os.environ.get("FILL_ALL", "1") == "1"
+_PB = float(os.environ.get("PULSE_BLANK_MS", 0) or 0)
+_PBF = {"auto": "", "interp": "i", "ar": "a"}[os.environ.get("PULSE_FILL", "auto")]
+_BD = os.environ.get("BARK_DENOM", "") or None
+_BD_SUF = ("" if not _BD else "_bdauto" if _BD == "auto" else f"_bd{float(_BD):g}")
+_VAR_SUF = (("" if _MED == 5 else f"_med{_MED}") + ("" if _FILL else "_nofill")
+            + ("" if not _PB else f"_pb{_PB:g}{_PBF}") + _BD_SUF)
+RUN_TAG = os.environ.get("RUN_TAG", "") + _VAR_SUF + _QC_SUF
                       # Threaded through EVERY filename this driver reads or writes. It was
                       # not, and the failure was silent in the worst way: compare_spikes
                       # honoured the tag when writing per-window files, so a tuned run computed
                       # tuned windows -- and then merge_windows read the UNTAGGED (default)
                       # windows and wrote the untagged merged file. The output equalled the
                       # default exactly, which reads as "the tuning made no difference".
-DELPHOS_CFG = dict(pin_free_ram_gb=12, Spk_thr=50, Spk_time_thr=1.25)
+# DELPHOS_PIN_GB overrides the RAM balloon. 12 is the tuned default and MUST stay the default:
+# Delphos's detections move with the pin, so two runs compared against each other have to share
+# it. It is overridable because 12 starves Delphos outright on long recordings -- it exited 0
+# without writing on the three files over ~4000 s (P5_ANT7, P5_Pulv7, P4_ANT7), which is an OOM.
+# Raising it for those trials means re-running BOTH sides of their comparison at the new value,
+# because all three are LF-continuous and are compared against their pre file. The value used is
+# written into the merged npz as `delphos_pin_gb` so a mismatched pair is detectable afterwards
+# rather than being invisible.
+DELPHOS_CFG = dict(pin_free_ram_gb=int(os.environ.get("DELPHOS_PIN_GB", "12")),
+                   Spk_thr=50, Spk_time_thr=1.25)
 _tune = json.loads(os.environ.get("DET_TUNE", "") or "{}").get("delphos", {})
 DELPHOS_CFG.update({k: v for k, v in _tune.items()})
                       # Delphos runs HERE, not in compare_spikes, so DET_TUNE has to be applied
@@ -67,22 +106,22 @@ BLOCK_SEC = int(os.environ.get("BLOCK_SEC", 60))        # the pipeline's block s
                                                         # 120 s the interactive script uses
 BASE_DIR = Path(r"C:\Users\amoo0039\Documents\local")
 META_PATH = BASE_DIR / "data_meta" / "stim_trials.json"
-RECORDINGS = {
-    "P1_pre":  dict(patient=1, trial_index=1, file_type="pre"),
-    "P1_stim": dict(patient=1, trial_index=1, file_type="stim"),
-    "P5_pre":  dict(patient=5, trial_index=1, file_type="pre"),
-    "P5_stim": dict(patient=5, trial_index=1, file_type="stim"),
-}
+from sdc.detect.recordings import RECORDINGS      # noqa: E402  -- one shared definition; this
+                                                  # table used to be duplicated in both modules
+                                                  # and they drifted the moment a recording was
+                                                  # added to only one of them.
 
 
 def plan(rec_id):
     """Every window for this recording: (start_rec, stop_rec, interior_t0, interior_t1) in
     1-based inclusive records and absolute seconds."""
-    cfg = RECORDINGS[rec_id]
-    trials = load_trials(META_PATH)
-    entry = get_trial(get_patient(trials, cfg["patient"]), cfg["trial_index"])
-    stem, _trial = resolve_file(entry, cfg["file_type"])
-    edf = BASE_DIR / f"P{cfg['patient']}" / f"{stem}.edf"
+    # One resolver for every caller. This used to resolve independently through the LOCAL
+    # stim_trials.json by trial_index, which is wrong for the AES cohort: the two JSONs list
+    # different trials in different orders, so P3's 7 Hz trial resolved a 145 Hz file, P8's ANT
+    # trial resolved a Pulv one, and two baselines resolved to a bare ".edf" because the local
+    # JSON leaves those fields empty. edf_path() keys on the FILENAME the cohort table carries.
+    from sdc.detect.recordings import edf_path
+    edf, _entry = edf_path(rec_id)
     hdr = read_edf_header(str(edf))
     fs = float(hdr["SampleRate"])
     total_sec = int(hdr["NumDataRecords"] * hdr["DataRecordDuration"])
@@ -122,7 +161,9 @@ def main():
     if len(windows) > 3:
         print(f"    ... {len(windows)-3} more")
 
-    dec_dir = ROOT / "prep_edf" / f"_{RECORDING}_windows"
+    # Per-profile: the dumped arrays are AR-filled against the mask, so two profiles produce
+    # DIFFERENT decimated signal under the same window number.
+    dec_dir = ROOT / "prep_edf" / f"_{RECORDING}{_VAR_SUF}{_QC_SUF}_windows"
     dec_dir.mkdir(parents=True, exist_ok=True)
     for w in windows:
         tag = f"_w{w['n']:03d}"
@@ -166,7 +207,7 @@ def merge_windows(rec_id=None, delete_parts=True):
 
     rec_id = rec_id or RECORDING
     edf, hdr, total_sec, windows = plan(rec_id)
-    dec_dir = ROOT / "prep_edf" / f"_{rec_id}_windows"
+    dec_dir = ROOT / "prep_edf" / f"_{rec_id}{_VAR_SUF}{_QC_SUF}_windows"
     parts = [np.load(RUNS / f"{rec_id}{RUN_TAG}_w{w['n']:03d}.npz", allow_pickle=False)
              for w in windows]
     z0 = parts[0]
@@ -175,16 +216,43 @@ def merge_windows(rec_id=None, delete_parts=True):
     n_chan = len(names)
     dets = [str(s) for s in z0["detectors"] if str(s) != "Delphos"]
 
+    # EVERY WINDOW MUST CARRY THE SAME DETECTORS. `dets` is read from window 1 alone, and the
+    # per-window npz files are CACHED and reused on a re-run -- so a window that lost a detector
+    # is permanent until deleted, and silent. This is not hypothetical: a MATLAB licence failure
+    # mid-batch ("Unable to launch MVM server", error 5001) made compare_spikes print
+    # "[warn] Barkmeier unavailable" and carry on, writing one window with Janca only. Merging
+    # that produces a Barkmeier rate missing an entire window of the recording -- a ~20% undercount
+    # on a 5-window file, in the right ballpark to be believed.
+    _want = set(dets)
+    for w, p in zip(windows, parts):
+        _have = {str(s) for s in p["detectors"] if str(s) != "Delphos"}
+        if _have != _want:
+            f = RUNS / f"{rec_id}{RUN_TAG}_w{w['n']:03d}.npz"
+            raise SystemExit(
+                f"window {w['n']:03d} has detectors {sorted(_have)} but window 001 has "
+                f"{sorted(_want)}.\n"
+                f"  A cached window is incomplete -- most likely a detector failed for that "
+                f"window only (check its log for 'unavailable').\n"
+                f"  DELETE it and re-run; the other windows are reused, so this is cheap:\n"
+                f"    del \"{f}\"")
+
     # ---- detections: interior only, shifted to absolute file time -------------------------
     per = {d: [[] for _ in range(n_chan)] for d in dets}
+    # The mask-rejected detections travel alongside, through the identical interior filter and
+    # merge, so `{Det}_idx_masked` in the merged file means exactly what `{Det}_idx` means minus
+    # having survived the mask. Needed to evaluate a LOOSER mask without re-running detectors.
+    rej = {d: [[] for _ in range(n_chan)] for d in dets}
     for w, z in zip(windows, parts):
         off = w["start_rec"] - 1                       # window start, seconds from file start
         for d in dets:
-            t = z[f"{d}_idx"] / fs + off               # absolute seconds
-            c = z[f"{d}_chan"]
-            keep = (t >= w["t0"]) & (t < w["t1"])      # INTERIOR only -- overlap never counted twice
-            for tt, cc in zip(t[keep], c[keep]):
-                per[d][cc].append(tt)
+            for src, acc in ((f"{d}_idx", per[d]), (f"{d}_idx_masked", rej[d])):
+                if src not in z.files:                 # run made before the masked arrays existed
+                    continue
+                t = z[src] / fs + off                  # absolute seconds
+                c = z[src.replace("_idx", "_chan")]
+                keep = (t >= w["t0"]) & (t < w["t1"])  # INTERIOR only -- overlap never counted twice
+                for tt, cc in zip(t[keep], c[keep]):
+                    acc[cc].append(tt)
 
     # ---- the whole-file preprocessed EDF ---------------------------------------------------
     chunks = []
@@ -209,8 +277,22 @@ def merge_windows(rec_id=None, delete_parts=True):
     # Distinct names defeat both: the file is rewritten and the cache misses.
     _v = f"_med{int(z0['med_kernel'])}_{fs:g}Hz"
     _v += "_fill" if ("fill_all" not in z0.files or int(z0["fill_all"])) else "_nofill"
+    # Read from the npz, not from the environment: the assembled EDF must be named after the
+    # profile the WINDOWS were actually computed at, which is the same argument the med_kernel
+    # and fill flags above are read from z0 for.
+    _prof = str(z0["qc_profile"]) if "qc_profile" in z0.files else "prod"
+    _v += "" if _prof == "prod" else f"_qc{_prof}"
+    # Pulse blanking changes the SAMPLES without changing their number, so a blanked file is
+    # byte-different but exactly the same SIZE as the unblanked one -- the precise case the
+    # comment above says the name has to defeat. Omitting it here handed Delphos the stale
+    # unblanked EDF and it returned a bit-identical cached result for every blanked run.
+    _pb = float(z0["pulse_blank_ms"]) if "pulse_blank_ms" in z0.files else 0.0
+    _pbf = str(z0["pulse_fill"]) if "pulse_fill" in z0.files else "auto"
+    _v += "" if not _pb else f"_pb{_pb:g}{ {'auto': '', 'interp': 'i', 'ar': 'a'}[_pbf] }"
     prep = ROOT / "prep_edf" / f"{rec_id}_full{_v}.edf"
-    if not prep.is_file():
+    if not MERGE_DELPHOS:
+        print(f"[prep] RUN_DELPHOS=0 -- not writing {prep.name} (it exists only for Delphos)")
+    elif not prep.is_file():
         print(f"[prep] writing {prep.name}  {full.shape} ...")
         write_edf(str(prep), full, names, fs)
         verify_edf(str(prep), full, names, fs)
@@ -234,34 +316,47 @@ def merge_windows(rec_id=None, delete_parts=True):
     on_sec = np.concatenate(on_all) if on_all else np.zeros(0, bool)
 
     # ---- Delphos, ONCE, over the assembled file --------------------------------------------
-    print(f"[delphos] one call over the whole {total_sec}s file")
-    dl = detect_delphos(str(prep), names, fs, start_sec=0.0, duration_sec=float(total_sec),
+    if not MERGE_DELPHOS:
+        print("[delphos] SKIPPED (RUN_DELPHOS=0): Janca and Barkmeier only")
+        dl = None
+    else:
+        print(f"[delphos] one call over the whole {total_sec}s file")
+        dl = detect_delphos(str(prep), names, fs, start_sec=0.0, duration_sec=float(total_sec),
                         cache_dir=ROOT / ".delphos_cache", bipolar=False, **DELPHOS_CFG)
     # SAME artefact mask as the other two. Janca and Barkmeier were masked inside their
     # per-window runs; Delphos is run here, so it must be masked here. Skipping this once made
     # Delphos the only unmasked arm and inflated it by ~20%, which read as a Delphos result.
     dmask = _assemble_mask(dec_dir, windows, fs, n_chan)
-    kept = []
+    kept, dropped = [], []
     n_raw = 0
-    for c, x in enumerate(dl):
+    for c, x in enumerate(dl if dl is not None else []):
         idx = np.unique(np.asarray(x, int))
         idx = idx[(idx >= 0) & (idx < dmask.shape[0])]
         n_raw += idx.size
         kept.append(list(idx[~dmask[idx, c]] / fs))
+        dropped.append(list(idx[dmask[idx, c]] / fs))     # kept for the same reason as above
     print(f"  [Delphos] {n_raw} detected -> artefact mask: "
           f"-{n_raw - sum(len(k) for k in kept)} -> {sum(len(k) for k in kept)} kept")
-    per["Delphos"] = kept
+    if dl is not None:
+        per["Delphos"] = kept
+        rej["Delphos"] = dropped
 
     # ---- one merge across the joins ---------------------------------------------------------
     merge_ms = float(z0["merge_ms"])
-    out = {}
-    for d in list(per):
-        idx = [merge_close(np.unique(np.round(np.asarray(v, float) * fs).astype(int)),
-                           merge_ms / 1000.0 * fs) if v else np.zeros(0, int) for v in per[d]]
-        out[d] = idx
-        print(f"  {d:<10} {sum(len(x) for x in idx)}")
+
+    def _merge_all(src):
+        return {d: [merge_close(np.unique(np.round(np.asarray(v, float) * fs).astype(int)),
+                                merge_ms / 1000.0 * fs) if v else np.zeros(0, int)
+                    for v in src[d]] for d in list(src)}
+
+    out = _merge_all(per)
+    out_rej = _merge_all(rej)
+    for d in out:
+        print(f"  {d:<10} {sum(len(x) for x in out[d])} kept"
+              f"  (+{sum(len(x) for x in out_rej.get(d, []))} masked, stored separately)")
     return dict(rec_id=rec_id, fs=fs, names=names, seconds=total_sec, prep=str(prep),
-                per=out, clean_sec=clean, on_sec=on_sec, n_samp=n_samp, windows=windows,
+                per=out, rej=out_rej, clean_sec=clean, on_sec=on_sec, n_samp=n_samp,
+                windows=windows,
                 clean_per_sec=(np.concatenate(clean_secs) if clean_secs
                                else np.zeros((0, n_chan), np.uint16)))
 
@@ -272,20 +367,54 @@ def write_merged(m):
     n_chan = len(m["names"])
     dump = {"names": np.array(m["names"]), "fs": np.float64(m["fs"]),
             "seconds": np.int64(m["seconds"]), "edf": m["prep"],
-            "detectors": np.array(["Janca", "Barkmeier", "Delphos"])}
-    for d in ("Janca", "Barkmeier", "Delphos"):
-        idx = m["per"][d]
-        dump[f"{d}_idx"] = (np.concatenate(idx) if any(len(x) for x in idx)
-                            else np.zeros(0, int))
-        dump[f"{d}_chan"] = (np.concatenate([np.full(len(x), c, int)
-                                             for c, x in enumerate(idx)])
-                             if any(len(x) for x in idx) else np.zeros(0, int))
+            "detectors": np.array([d for d in ("Janca", "Barkmeier", "Delphos")
+                                   if d in m["per"]])}
+    for d in [str(x) for x in dump["detectors"]]:
+        # Kept and mask-rejected, written the same way. The `_masked` arrays are what lets a
+        # looser mask be tried later; they are NOT part of any result and no reader that ignores
+        # them changes behaviour. Note this is a whitelist-style writer -- a new key that is not
+        # named here never reaches the merged file, which is how `qc_profile` and `pStimAll`
+        # were both silently lost after being added correctly to the per-window dump.
+        for suf, src in (("", m["per"]), ("_masked", m.get("rej", {}))):
+            idx = src.get(d, [])
+            has = any(len(x) for x in idx)
+            dump[f"{d}_idx{suf}"] = np.concatenate(idx) if has else np.zeros(0, int)
+            dump[f"{d}_chan{suf}"] = (np.concatenate([np.full(len(x), c, int)
+                                                      for c, x in enumerate(idx)])
+                                      if has else np.zeros(0, int))
     z0 = np.load(RUNS / f"{m['rec_id']}{RUN_TAG}_w001.npz", allow_pickle=False)
     for k in ("merge_ms", "dilate_ms", "tol_ms", "detect_fs", "mask_artefacts", "janca_pt_ms",
+              "qc_profile",   # which artefact mask produced this run. Without it the merged
+                              # file cannot be told apart from a production run except by its
+                              # filename, and a filename is not provenance.
               "qc_native", "med_kernel", "fill_bad_samples", "rec_id", "patient", "condition",
-              "stim_hz", "delphos_input"):
+              "stim_hz", "delphos_input",
+              # Pulse blanking and the baseline window. These were dumped per WINDOW but not
+              # carried here, so the merged file -- the one every figure reads -- had no record
+              # of them. sdc.artefact.inspect.view_run reads pulse_blank_ms from the merged npz
+              # to decide whether to blank the trace it draws, and silently drew an UNBLANKED
+              # trace labelled "blanked" because the key was missing.
+              "pulse_blank_ms", "pulse_fill", "pulse_max_peak_uv", "pulse_n", "pulse_thr",
+              "pulse_isi_ms", "pulse_n_gated_out", "pulse_blank_frac", "baseline_sec",
+              # Barkmeier's normaliser: what it was PINNED to (nan = published behaviour) and
+              # the legacy BARK_SCALE knob. Both are scalar and constant across windows.
+              "bark_fixed_denom", "bark_scale"):
         if k in z0.files:
             dump[k] = z0[k]
+    # ...and the MEASURED per-block denominators, which are NOT constant across windows: each
+    # window reports its own blocks, so the merged record is their concatenation. Taken from
+    # every window rather than from w001, because the median over one window is not the median
+    # over the recording -- and that median is what tools/run_pinned_2hz.py reads back to pin
+    # the whole comparison to.
+    _bd = []
+    for _i in range(1, len(m["windows"]) + 1):
+        _p = RUNS / f"{m['rec_id']}{RUN_TAG}_w{_i:03d}.npz"
+        if not _p.is_file():
+            continue
+        with np.load(_p, allow_pickle=False) as _zw:
+            if "bark_block_denom" in _zw.files and _zw["bark_block_denom"].size:
+                _bd.append(np.asarray(_zw["bark_block_denom"], float).ravel())
+    dump["bark_block_denom"] = np.concatenate(_bd) if _bd else np.zeros(0, float)
     # windowing provenance -- a run made at a different window size is NOT comparable, because
     # Janca's background model and Barkmeier's block threshold are both computed over the span
     # they are handed.
@@ -293,6 +422,10 @@ def write_merged(m):
     # restricting an analysis to a sub-range (e.g. "the first 900 s, before the artefact at the
     # end") can only SCALE the whole-recording clean time -- which assumes masking is uniform in
     # time, and the entire reason for wanting a sub-range is that it is not.
+    # The Delphos operating point this run used. Not cosmetic: the detections move with it, so a
+    # run compared against one made at a different pin is confounded, and without this the only
+    # evidence of which pin produced a file is the shell that launched it.
+    dump["delphos_pin_gb"] = np.int64(DELPHOS_CFG.get("pin_free_ram_gb") or 0)
     dump["clean_per_sec"] = m["clean_per_sec"]
     dump["on_per_sec"] = m["on_sec"]
     dump["window_sec"] = np.int64(m["windows"][0]["stop_rec"] - m["windows"][0]["start_rec"] + 1)
@@ -319,22 +452,30 @@ def write_merged(m):
         dump["on_runs"] = (b.reshape(-1, 2) * int(m["fs"])).astype(np.int64)
         dump["sec_on"] = np.float64(on.sum())
         dump["sec_off"] = np.float64((~on).sum())
-        for d in ("Janca", "Barkmeier", "Delphos"):
-            t = (dump[f"{d}_idx"] / m["fs"]).astype(int)
-            dump[f"{d}_on"] = on[np.clip(t, 0, on.size - 1)] if dump[f"{d}_idx"].size                 else np.zeros(0, bool)
+        for d in [str(x) for x in dump["detectors"]]:
+            for suf in ("", "_masked"):
+                v = dump[f"{d}_idx{suf}"]
+                t = (v / m["fs"]).astype(int)
+                dump[f"{d}_on{suf}"] = (on[np.clip(t, 0, on.size - 1)] if v.size
+                                        else np.zeros(0, bool))
     else:
         dump["clean_sec_on"] = np.zeros(n_chan)
         dump["clean_sec_off"] = m["clean_sec"]
         dump["on_runs"] = np.zeros((0, 2), np.int64)
         dump["sec_on"] = np.float64(0.0)
         dump["sec_off"] = np.float64(m["seconds"])
-        for d in ("Janca", "Barkmeier", "Delphos"):
+        # dump["detectors"], NOT a hardcoded triple. The stim branch above already does this;
+        # this branch did not, so a BASELINE run with RUN_DELPHOS=0 died with
+        # KeyError: 'Delphos_idx'. Stim runs were unaffected because they take the other branch,
+        # which is why it survived until a baseline was first run without Delphos.
+        for d in [str(x) for x in dump["detectors"]]:
             dump[f"{d}_on"] = np.zeros(dump[f"{d}_idx"].size, bool)
     out = RUNS / f"{m['rec_id']}{RUN_TAG}.npz"
     check_run(dump, n_samp=m["n_samp"], fs=m["fs"])
     np.savez(out, **{k: v for k, v in dump.items() if v is not None})
     print(f"[saved] {out.name}   "
-          + "  ".join(f"{d} {dump[f'{d}_idx'].size}" for d in ("Janca", "Barkmeier", "Delphos")))
+          + "  ".join(f"{d} {dump[f'{d}_idx'].size}"
+                        for d in [str(x) for x in dump["detectors"]]))
     return out
 
 

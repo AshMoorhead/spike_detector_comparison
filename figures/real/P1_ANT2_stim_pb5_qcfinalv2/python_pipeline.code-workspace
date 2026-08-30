@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../../../python_pipeline"
+		},
+		{
+			"path": "../../../../seeg_analysis"
+		},
+		{
+			"path": "../../.."
+		}
+	],
+	"settings": {}
+}

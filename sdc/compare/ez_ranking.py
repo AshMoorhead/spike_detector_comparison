@@ -141,7 +141,9 @@ def figure(recs):
                  "(EZ list is from the trials JSON, independent of every detector)",
                  fontsize=11)
     fig.tight_layout()
-    out = figdir("real") / "ez_ranking.png"
+    # named from the stems: the same figure over different runs is a different result, and one
+    # fixed filename means the last invocation silently replaces the previous patient's answer
+    out = figdir("real") / ("ez_ranking_" + "_".join(recs) + ".png")
     fig.savefig(out, dpi=130)
     plt.close(fig)
     print(f"\n[saved] {out}")

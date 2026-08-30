@@ -26,6 +26,7 @@ COLUMNS
   whatever ratio that protocol happened to use, so it means nothing on its own.
 """
 import itertools
+import os
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,10 @@ RUNS = HERE / "runs"
 OUT = HERE / "figures" / "real"
 
 # (npz stem, COND) -> column label. Order is the x-axis order.
+# RUN_TAG=_tuned compares the runs made at the BIDS-tuned operating points instead of the
+# defaults. Both sets live side by side on disk, and the figure name carries the tag so
+# neither can overwrite the other.
+TAG = os.environ.get("RUN_TAG", "")
 COLUMNS = [("P1_pre", "all", "P1\nbaseline"),
            ("P1_stim", "off", "P1 stim\nOFF"),
            ("P1_stim", "on", "P1 stim\nON"),
@@ -125,11 +130,11 @@ def median_dt(col, a, b):
 # ----------------------------------------------------------------------
 cols, labels = [], []
 for stem, label, disp in COLUMNS:
-    if not (RUNS / f"{stem}.npz").is_file():
-        print(f"[skip] runs/{stem}.npz not found")
+    if not (RUNS / f"{stem}{TAG}.npz").is_file():
+        print(f"[skip] runs/{stem}{TAG}.npz not found")
         continue
     try:
-        cols.append(load(stem, label))
+        cols.append(load(stem + TAG, label))
     except SystemExit as e:                # e.g. COND=on on a baseline
         print(f"[skip] {stem} {label}: {e}")
         continue
@@ -221,6 +226,6 @@ fig.suptitle("Does each finding hold across condition and patient?   "
              fontsize=11)
 fig.tight_layout()
 OUT.mkdir(parents=True, exist_ok=True)
-fig.savefig(OUT / "compare_recordings.png", dpi=130)
+fig.savefig(OUT / f"compare_recordings{TAG}.png", dpi=130)
 print(f"\n[saved] {OUT / 'compare_recordings.png'}")
 plt.close(fig)

@@ -461,8 +461,224 @@ to reproduce the stored count exactly, which is the proof the fix is a no-op at 
 
 ---
 
+### Delphos's elevation under stimulation is set by channel QUIETNESS, not by the pulse
+
+Measured on P1 ANT 2 Hz (`P1_ANT2_stim`, 955 s, 226 channels, 1908 pulses), where Delphos reads
+**1.88×** stim/baseline against Janča 0.94× and Barkmeier 0.58× — a 3.24× spread. It decomposes
+into two independent parts, and **the pulse is the smaller one**.
+
+**Component 1 — pulse-locked artefact, ~11% of the effect.** 19.2% of Delphos's detections fall
+within ±10 ms of a pulse, against 4.0% by chance. Janča (3.1%) and Barkmeier (2.6%) sit *below*
+chance, and all three sit at chance on the stim-free baseline with the same pulse grid imposed
+artificially — so this is Delphos-specific and not an artefact of the method. The offset
+histogram has two peaks: 0–5 ms at 23× the null, and a second at 15–25 ms at ~5×. Rejecting
+±10 ms (`sdc/artefact/pulse_reject.py`) moves Delphos 1.881 → 1.685 and the spread 3.24 → 2.87.
+
+**Component 2 — quietness, and it dominates.** ρ(log ratio, baseline rate) = **−0.66**, and
+pulse rejection does not touch it: **−0.68** after ±10 ms, −0.66 after ±30 ms. By baseline-rate
+tercile Delphos reads **3.47× on the quietest third and 0.92× on the busiest**.
+
+The mechanism is a constant, not a proportional, contamination. Stimulation adds a roughly fixed
+**+1.86 det/chan-min** to Delphos regardless of the channel's own rate, so
+`ratio = 1 + added/baseline` and the ratio must fall as 1/baseline. With `added` fixed at its
+single median value the prediction has **no free parameters** and reproduces the whole gradient:
+
+| baseline quintile | 0.68/min | 1.50 | 2.73 | 5.19 | 11.07 |
+|---|---|---|---|---|---|
+| observed ratio | 3.85 | 2.56 | 2.06 | 1.49 | **0.83** |
+| `1 + 1.86/baseline` | 3.73 | 2.24 | 1.68 | 1.36 | 1.17 |
+
+Q5 is where it breaks, in the informative direction: the added rate there is **negative**
+(−2.81/min), so on the busiest channels the artefact is swamped and the real suppression shows
+through — the same ~0.85 all three detectors converge on at the p80 gate.
+
+**Why no peri-pulse rule can reach component 2.** The artefact is a 2 Hz harmonic comb (~50
+lines past 100 Hz, 99.9% of 0.5–80 Hz power on the stim channel) running *continuously* through
+the cycle. Continuous means **uniform in phase**, so a window keyed on time-since-pulse has
+nothing to select. Delphos whitens its time-frequency plane per channel, which is why a fixed
+absolute contamination becomes a large *relative* one exactly where the channel is quiet.
+
+**The confound, controlled.** A ratio plotted against its own denominator correlates negatively
+with no mechanism at all (noise in the denominator throws small-baseline channels to large
+ratios). Barkmeier's correlation is **+0.33** — the wrong sign — so the axes are not producing
+Delphos's −0.66. Janča's −0.48 is largely that statistical effect: its added rate is ≈0.
+
+**Consequence.** The baseline-rate gate is not a workaround, it is the correct response to an
+artefact whose ratio impact scales as 1/signal. It is also the only lever with real leverage:
+
+| intervention | spread | cost |
+|---|---|---|
+| median kernel 1 / 5 / 11 | ~3.2× throughout | — |
+| `grad` ladder 4000→300, fixed channels | 3.24 → 3.11× | 35.7% of ON time, 51 channels |
+| 5 ms pulse blank, interp fill | 3.24 → 3.12× | 0.9% of samples |
+| ±10 ms detection rejection | 3.24 → 2.87× | 4% of time |
+| **baseline-rate gate, p80** | **3.24 → 1.19×** | 151 of 189 channels |
+
+Figures: `component2_quietness.png`, `rate_gate_box.png`, `baseline_effect_box_{control,pr10,pr30}.png`,
+all in `figures/real/P1_ANT2_stim_qcfinalv2/`.
+
+**Pulse blanking is a null here, and dangerous with the wrong fill.** `blank_pulses` at 5 ms
+moves Janča and Barkmeier by <1% — on channels QC passes, the median filter already handled the
+pulse. With **AR fill** it is actively harmful: Delphos went **1.88 → 10.69**, with 81.9% of its
+detections within ±5 ms of a pulse and a median ISI of 998 ms (= 2× the 500 ms period). It was
+firing on its own repair. Linear interpolation gives 1.81 and is safe. `method="auto"` routes
+anything over 4 samples to AR, so a 5 ms blank at 2 kHz hits the bad path by default.
+
+---
+
+### Barkmeier's amplitude normaliser is silently rescaled by low-frequency stimulation
+
+`mDetectSpike` renormalises **every 1-minute block** to its own mean amplitude
+(`scale = SCALE / median(mean|EEG|)`) and applies `TAMP`/`LS`/`RS` *after* that scaling. The
+effective threshold therefore tracks the recording. Within one recording that is the intended
+behaviour and is what the paper describes. **Across two recordings it is a confound**, and it is
+invisible in the detector's output.
+
+**It is a band effect, not a stimulation effect.** The quantity is measured on Barkmeier's
+MEASUREMENT signal, which `FilterSpec(3:4)` band-limits to **1–35 Hz**. A 2 Hz pulse train's
+fundamental and low harmonics sit *inside* that band; 145 Hz and all its harmonics sit above the
+35 Hz low-pass and are filtered out before the median is taken. Measured on P1 (`[bark] scale
+denominator`, printed by every run):
+
+| trial | condition | stim | baseline | stim/base |
+|---|---|---|---|---|
+| 2 Hz | none | 25.36 | 16.79 | **1.510** |
+| 2 Hz | k450 + g1000 | 25.38 | 16.79 | 1.511 |
+| 2 Hz | dynR + g1000 | 25.53 | 16.79 | 1.520 |
+| 145 Hz | none | 17.45 | 17.23 | **1.013** |
+| 145 Hz | k450, grad OFF | 16.47 | 17.31 | 0.951 |
+| 145 Hz | k450 + g1000 | 16.17 | 17.00 | 0.951 |
+
+**Read the 2 Hz block downward: no artefact-handling condition moves it.** Stimulation is
+continuous, so there is no clean time to mask back to, and masking removes contaminated epochs
+from the numerator and the normaliser alike. Barkmeier runs a **51% higher threshold** during
+stimulation than during its own baseline and reports suppression that is partly the threshold
+moving. At 145 Hz the same quantity moves 1.3%, and masking slightly *over*-corrects it.
+
+**The fix is inside the detector.** `mDetectSpike_coeffs.m` gained an optional `FixedDenom`
+input and a 4th output `BlockDenom` (the per-block denominators it actually computed). With
+`FixedDenom` supplied the per-block normaliser is replaced by one value, given to the stim file
+**and its baseline alike** — pinning only the stim side leaves the baseline adapting per block,
+which is a different comparison rather than a corrected one. Drive it with
+`tools/run_pinned_2hz.py`, or `BARK_DENOM=<uV>|auto` on `compare_spikes`.
+
+On P1 ANT 2 Hz this moves Barkmeier's stim/baseline ratio **0.39 → 1.03**, against Janča 1.04 —
+i.e. into agreement with the detector it had been contradicting.
+
+**Two earlier attempts, and why they failed.** The `BARK_SCALE` knob back-solves a single
+constant from a Python reconstruction of the denominator. The reconstruction is *right* — it
+agrees with MATLAB to 4 s.f. (25.53 vs 25.53) — but one constant cannot undo a per-block
+normaliser: it corrects a second time what the per-block renormalisation already partly
+corrected, and overshot to 0.98. `FixedDenom` replaces the normaliser outright instead.
+
+**Verification.** The new MATLAB path is a **bit-identical no-op** when `FixedDenom` equals the
+value the detector computes for itself (single-block test, 299 detections either way), and Janča
+comes back with an identical count in all 10 pinned-vs-unpinned pairs — `fixed_denom` reaches
+`detect_barkmeier` only, so any Janča movement would mean the pinned run differed in something
+else. See `tools/run_pinned_2hz._check_janca`.
+
+**Do not quote a "corrected" ratio as truth.** There is no ground truth for the 2 Hz effect.
+Pinning removes an identified threshold artefact; it does not establish that the resulting
+number is right. It also discards Barkmeier's within-recording adaptation, which is real
+behaviour the paper intends — the right trade for comparing rates *between* recordings, and a
+deviation that has to be declared.
+
+---
+
+### Half of Janča's and Delphos's 2 Hz detections are pulse-locked
+
+A −5/+15 ms window around each pulse covers 4.0% of the recording by chance. On the unmasked
+2 Hz file it removes **51.5% of Janča's and 50.5% of Delphos's** detections — a 13× enrichment —
+against **2.7% for Barkmeier**, which is *below* chance. Barkmeier never fires on the pulse.
+
+Once epoch-level rejection is applied it removes 2.5% / 2.9%, i.e. at chance: the epoch rule has
+already taken them. So peri-pulse rejection adds nothing on top, which is a statement about the
+epoch rule's adequacy and **not** evidence that pulse artefact is harmless. At a wider −10/+30 ms
+window Delphos alone still shows 12.7% against 8.0% chance, so it retains a residual the epoch
+rule misses.
+
+`sdc/artefact/pulse_reject.py`, asymmetric `pre_ms`/`post_ms`.
+
+---
+
 ## Corrections — things that were wrong, so they are not re-derived
 
+- **The 145 Hz effect was diluted by 70% of unstimulated time.** Every stim/baseline ratio used
+  `cond.select(z, "all")`. P1's 145 Hz trial is INTERMITTENT — 332 s ON out of 1097 — so "all"
+  averaged the stimulated period with 765 s of unstimulated recording, pulling every detector
+  toward 1.0 and toward each other. It reported between-detector spread of **1.05** under epoch
+  masking where the stimulated time alone gives **2.02**, and 1.42 unmasked against 4.01. The
+  2 Hz trial is CONTINUOUS, so its "all" was already all-ON and was never diluted — the two
+  panels of the same figure were being read differently while the code claimed they were not.
+  Selecting ON is the one rule correct for both: a no-op on a continuous trial, and it removes
+  the dilution on an intermittent one. It also stops epoch masking flattering itself, since
+  masking removes 35% of ON time against 1.7% of OFF time at 145 Hz.
+- **Channels showing total suppression were being deleted.** Every ratio required
+  `stim_rate > 0`, which drops any channel where a detector fired at baseline and *not once*
+  during stimulation — the largest effect in the data. On P1 145 Hz that was 15 of Barkmeier's
+  123 measurable channels, and because the channel set is intersected across detectors it pulled
+  the whole comparison to 107 channels from 164. Rates now carry a Haldane–Anscombe continuity
+  correction (`+0.5` counts) so a zero-numerator channel lands at its own detection floor and
+  stays in. **The correction has to be ONE-SIDED**: a numerator zero means "the effect was
+  total", which is a measurement; a denominator zero means "this detector never found anything
+  here", which is not a baseline to compare against. Applying it to both let the 41 channels
+  where Barkmeier is silent at baseline into the 145 Hz `none` row and moved its median from
+  0.542 to 1.290 — inverting the direction of the result.
+- **Each detector's median was computed on its own channel set.** At 145 Hz under grad-150 that
+  is Janča 88 channels, Delphos 94, Barkmeier 60 — so "between-detector spread" was partly a
+  difference between three montages, and the figure's channel count was `max()` over them while
+  a companion figure used the intersection (94 vs 56 on the same row). `matrix_report.row_mask`
+  now returns the intersection and every detector in a row is measured on it.
+- **`write_merged` is a whitelist writer and silently dropped `bark_block_denom`.** The key was
+  dumped per window but never copied into the merged npz, so the pinning probe could not read
+  the value it had just measured. Same defect that had already lost `qc_profile` and `pStimAll`.
+  Note the per-block denominators are **not** constant across windows, so they are concatenated
+  from every window rather than read from `w001` — the median over one window is not the median
+  over the recording, and that median is what the whole comparison is pinned to.
+- **A MATLAB licence failure mid-batch produced a silently incomplete run.** `compare_spikes`
+  caught the engine error, printed `[warn] Barkmeier unavailable` and carried on, writing one
+  window with Janča only. Per-window files are cached and reused, so that window would have been
+  permanent, and the merged file would have reported a Barkmeier rate missing a whole window of
+  a 5-window recording — about a 20% undercount, on the detector the analysis is about. A failed
+  Barkmeier is now **fatal** (`ALLOW_MISSING_BARKMEIER=1` opts out for a machine with no MATLAB),
+  and `run_windows` refuses to merge windows whose detector sets differ.
+- **`inspect.view_run` resolved the DERIVED montage** while every run uses the clinical one, and
+  silently dropped any requested channel it could not find. Same defect that invalidated every
+  run in this project once already. It now uses the clinical montage and names what it cannot
+  draw.
+- **`period_course` wrote to a fixed filename**, so generating it for a second artefact condition
+  replaced the first with no way to compare them. It takes `fname` now, and `tmax` for truncating
+  a terminal artefact burst.
+- **A glob for the pinned runs matched their own derived children.** `<rec>_bd*_qc<profile>`
+  also matched `<rec>_bd16.79_prm5p15_qc<profile>`, so two candidates were found, the lookup
+  returned None, and one row silently fell back to UNPINNED Barkmeier while its neighbours were
+  pinned. Caught only because 0.516 sat oddly among four 0.996s.
+- **Delphos silently returned a CACHED result for every pulse-blanked run.** `PREP_EDF`'s
+  filename is built from `MED_KERNEL`, `fs`, `FILL_ALL` and the QC profile. Pulse blanking
+  rewrites samples without changing their count, so the blanked EDF was byte-different but
+  **exactly the same size** — and Delphos caches on path + size. The run printed
+  `[prep] reusing …` and handed it a stale unblanked file. Delphos's detection array came back
+  *bit-identical* to the control while Janča and Barkmeier (which run in-process) changed. Both
+  call sites already carried comments warning about this exact case. The suffix now propagates
+  to the npz name, `run_windows._VAR_SUF`, **and both prep-EDF stems**. Always check a detector's
+  array actually differs before interpreting a variant.
+- **Blanking before QC does not clean channels, it blinds the artefact detector.** QC's
+  `lf_artefact` rule fires on `max |diff|`; blanking removes exactly that gradient and leaves the
+  50–105 ms decay it cannot reach. Blanking first dropped the mask 17.51% → 7.29%, but the
+  recovered time was 21 whole channels flipping from excluded to included (surviving channels
+  gained 37 of 2968 clean minutes, 1.2%), and Delphos then fired at 44.8 det/chan-min on them
+  against 8.7 elsewhere. The artefact detector must run on the RAW signal, before the median
+  filter and before blanking; blanking only cleans what QC has already passed.
+- **The merged npz dropped the pulse and baseline provenance.** `write_merged` carries an
+  explicit key list, and `pulse_blank_ms` / `pulse_fill` / `baseline_sec` were dumped per window
+  but never copied into the merged file. `inspect.view_run` reads `pulse_blank_ms` from the
+  merged npz to decide whether to blank the trace it draws, found nothing, and drew an
+  **unblanked** trace labelled "blanked". `baseline_sec` had never been recorded at all, so no
+  earlier run's baseline convention is recoverable from its output.
+- **Four figure functions hardcoded their output filename**, so calling one for a second variant
+  into the same folder silently replaced the first — the control version of
+  `baseline_effect_box` was lost this way. `ez_ranking`, `baseline_effect_box`, `rate_gate_box`
+  and `raster` now take `fname` or derive the name from the run stems.
 - **The simulated template had a step discontinuity.** It was truncated at −0.19 of peak, so
   every injected spike ended in a sharp edge that Delphos correctly detected. This made Delphos
   look imprecise. Fixing it moved its SNR-12 precision **0.810 → 0.997** and reversed the

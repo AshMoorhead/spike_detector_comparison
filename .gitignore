@@ -59,3 +59,13 @@ prep_edf/
 #                  hazard: a 226-channel dump made before the clinical montage landed caused
 #                  every kStim condition to fail silently. Delete the directory to rebuild.
 qc_features/
+#
+# runs/*_wNNN.npz -- PER-WINDOW intermediates. run_windows splits a recording into RAM-sized
+#                    windows, writes one npz each, then merges them; the merged file is what
+#                    every figure reads. The windows exist so an interrupted batch resumes at
+#                    the window it reached, and they are ~110 MB per P1 condition set against
+#                    ~156 MB for every merged P1 run combined. npz are already zlib-compressed,
+#                    so git cannot delta them -- each re-run adds a full copy to history for
+#                    good. Merged runs ARE tracked; these are not. (35 predate this rule and
+#                    stay tracked, since ignoring does not untrack.)
+runs/*_w[0-9][0-9][0-9].npz
